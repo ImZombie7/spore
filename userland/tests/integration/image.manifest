@@ -1,0 +1,2 @@
+userland/tests/integration /init
+userland/tests/integration/exec_child.c /bin/exec_child

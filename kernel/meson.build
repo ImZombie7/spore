@@ -47,6 +47,8 @@ kernel_elf = executable('kernel.elf',
 limine_dir = meson.project_source_root() / 'third_party' / 'limine'
 iso_root = meson.current_build_dir() / 'iso_root'
 image_iso = meson.project_build_root() / 'image.iso'
+test_iso_root = meson.current_build_dir() / 'test_iso_root'
+test_image_iso = meson.project_build_root() / 'test_image.iso'
 
 make_limine = custom_target('limine-host-tool',
   output: 'limine-built.stamp',
@@ -75,6 +77,28 @@ image = custom_target('image.iso',
   build_always_stale: true,
   build_by_default: true)
 
+test_image = custom_target('test_image.iso',
+  input: [
+    kernel_elf,
+    files('boot/limine.conf.in'),
+    files('../userland/tests/integration/image.manifest'),
+    files('../tools/build_image.py'),
+    make_limine,
+  ],
+  output: 'test_image.iso',
+  command: [
+    files('../tools/build_image.py'),
+    meson.project_source_root(),
+    test_iso_root,
+    kernel_elf,
+    files('boot/limine.conf.in'),
+    limine_dir,
+    test_image_iso,
+    '@OUTPUT@',
+    files('../userland/tests/integration/image.manifest'),
+  ],
+  build_always_stale: true)
+
 qemu_code = run_command('sh', '-c',
   'for dir in $(qemu-system-aarch64 -L help 2>/dev/null); do ' +
   '  for file in "$dir/edk2-aarch64-code.fd" "${dir%-firmware}/qemu/edk2-aarch64-code.fd"; do ' +
@@ -87,7 +111,7 @@ qemu_code = run_command('sh', '-c',
   'exit 1',
   check: true).stdout().strip()
 
-qemu_args = [
+qemu_base_args = [
   'qemu-system-aarch64',
   '-M', 'virt,gic-version=3',
   '-accel', 'hvf',
@@ -95,7 +119,16 @@ qemu_args = [
   '-m', '512M',
   '-boot', 'order=d,menu=off,strict=on',
   '-drive', 'if=pflash,format=raw,readonly=on,file=' + qemu_code,
+]
+
+qemu_args = qemu_base_args + [
   '-cdrom', image_iso,
+  '-serial', 'stdio',
+  '-display', 'none',
+]
+
+test_qemu_args = qemu_base_args + [
+  '-cdrom', test_image_iso,
   '-serial', 'stdio',
   '-display', 'none',
 ]
@@ -121,6 +154,12 @@ run_target('run-shell',
     files('../tools/run_qemu_shell.py'),
   ] + qemu_args,
   depends: image)
+
+run_target('run-tests',
+  command: [
+    files('../tools/run_qemu.py'),
+  ] + test_qemu_args,
+  depends: test_image)
 
 run_target('run-tcg',
   command: [

@@ -286,14 +286,35 @@ int main(void) {
     printf("\n");
     close(dfd);
 
+    int ok_all = 1;
+    if (after_touch <= before || after_free >= after_touch) {
+        ok_all = 0;
+    }
+    if (strcmp(buf, "welcome to spore") != 0) {
+        ok_all = 0;
+    }
+    if (dent_bytes <= 0) {
+        ok_all = 0;
+    }
+
+    int ok_v1 = snapshot_regression();
     printf("[spore] v1 regression (snapshot/spawn/reap): %s\n",
-           snapshot_regression() ? "PASS" : "FAIL");
+           ok_v1 ? "PASS" : "FAIL");
+    ok_all = ok_all && ok_v1;
+
+    int ok_v2b = phase_b_timer_budget_demo();
     printf("[spore] v2b timer/budget demo: %s\n",
-           phase_b_timer_budget_demo() ? "PASS" : "FAIL");
+           ok_v2b ? "PASS" : "FAIL");
+    ok_all = ok_all && ok_v2b;
+
+    int ok_v2c = phase_c_exec_demo();
     printf("[spore] v2c fork/exec/wait demo: %s\n",
-           phase_c_exec_demo() ? "PASS" : "FAIL");
+           ok_v2c ? "PASS" : "FAIL");
+    ok_all = ok_all && ok_v2c;
+
     (void)phase_c_stdin_demo();
-    (void)phase_d_fs_demo();
-    printf("[spore] cell 1: exit(0)\n");
-    return 0;
+    ok_all = ok_all && phase_d_fs_demo();
+    printf("[spore] integration regression: %s\n", ok_all ? "PASS" : "FAIL");
+    printf("[spore] cell 1: exit(%d)\n", ok_all ? 0 : 1);
+    return ok_all ? 0 : 1;
 }

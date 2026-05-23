@@ -14,7 +14,6 @@ COMMANDS = [
     b"cat /tmp/f\n",
     b"mkdir /tmp/d && cd /tmp/d && touch x && ls\n",
     b"/bin/hello\n",
-    b"/bin/spore_demo\n",
     b"confine compute-only /demos/spinner\n",
     b"confine compute-only /demos/peeker /etc/motd\n",
     b"confine fs:/tmp /demos/peeker /etc/motd\n",
