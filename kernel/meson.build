@@ -28,12 +28,13 @@ kernel_sources = files(
   'src/exec/stack.c',
   'src/lib/mem.c',
   'src/mm/pmm.c',
+  'src/mm/vma.c',
   'src/mm/vmm.c',
   'src/ramfs.c',
 )
 
 init_bin = custom_target('init',
-  input: files('../userland/spore_v1_demo.c'),
+  input: files('../userland/spore_v15_demo.c'),
   output: 'init',
   command: [
     'zig', 'cc',

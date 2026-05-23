@@ -274,6 +274,7 @@ void kernel_main(void) {
     struct ramfs fs;
     struct ramfs_file init;
     ramfs_init(&fs, module_request.response);
+    syscall_set_ramfs(&fs);
     if (!ramfs_lookup(&fs, "/init", &init)) {
         kprintf("[kernel] missing /init\n");
         for (;;) {

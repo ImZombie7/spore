@@ -33,6 +33,10 @@ bool vmm_clone_cow(struct user_address_space *dst,
                    uint16_t asid);
 void vmm_destroy(struct user_address_space *as);
 bool vmm_handle_cow_fault(struct user_address_space *as, uint64_t va);
+bool vmm_is_mapped(const struct user_address_space *as, uint64_t va);
+void vmm_unmap_range(struct user_address_space *as, uint64_t start, uint64_t end);
+void vmm_protect_range(struct user_address_space *as, uint64_t start, uint64_t end, uint32_t flags);
+size_t vmm_mapped_pages_in_range(const struct user_address_space *as, uint64_t start, uint64_t end);
 uint64_t vmm_user_to_phys(const struct user_address_space *as, uint64_t va);
 bool vmm_user_range_accessible(const struct user_address_space *as,
                                uint64_t va,

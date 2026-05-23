@@ -2,14 +2,19 @@
 
 #include "arch/aarch64/regs.h"
 #include "elf/loader.h"
+#include "mm/vma.h"
 #include "mm/vmm.h"
+#include "ramfs.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 enum {
     MAX_CELLS = 16,
     MAX_SNAPSHOTS = 8,
+    MAX_FDS = 32,
+    MAX_OPEN_FILES = 64,
     CELL_SWITCHED = -0x40000000,
 };
 
@@ -20,21 +25,40 @@ enum cell_state {
     CELL_ZOMBIE,
 };
 
+enum open_file_type {
+    OPEN_NONE,
+    OPEN_STDIN,
+    OPEN_STDOUT,
+    OPEN_RAMFS,
+};
+
+struct open_file {
+    bool used;
+    uint16_t refcount;
+    enum open_file_type type;
+    uint64_t offset;
+    uint32_t flags;
+    struct ramfs_node node;
+};
+
 struct cell {
     int pid;
     int parent_pid;
     enum cell_state state;
     struct user_address_space as;
+    struct vma_list vmas;
     struct trap_frame tf;
     uint64_t tpidr_el0;
     int exit_status;
     int wait_target;
+    struct open_file *fds[MAX_FDS];
 };
 
 struct snapshot {
     bool used;
     int id;
     struct user_address_space as;
+    struct vma_list vmas;
 };
 
 void cell_system_init(uint64_t hhdm_offset);
@@ -49,7 +73,23 @@ void cell_exit_current(int status, struct trap_frame *frame);
 int cell_fork_current(struct trap_frame *frame);
 int cell_wait4(int pid, uint64_t status_addr, struct trap_frame *frame);
 int cell_kill(int pid, int signal);
+int64_t cell_fd_write(int fd, uint64_t buf, uint64_t len);
+int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len);
+int64_t cell_fd_lseek(int fd, int64_t off, int whence);
+int cell_fd_open_node(const struct ramfs_node *node, uint32_t flags);
+int cell_fd_dup(int oldfd, int minfd);
+int cell_fd_close(int fd);
+bool cell_fd_stat(int fd, struct ramfs_node *out);
+bool cell_fd_next_dirent(int fd, struct ramfs_dirent *out);
+void cell_fd_rewind_one_dirent(int fd);
+uint64_t cell_fd_dir_offset(int fd);
 bool cell_handle_cow_fault(uint64_t far);
+bool cell_handle_translation_fault(uint64_t far, enum vmm_access access);
+bool cell_ensure_user_range(uint64_t va, size_t len, enum vmm_access access);
+bool cell_add_vma(uint64_t start, uint64_t end, uint32_t prot, uint32_t flags);
+bool cell_remove_vma(uint64_t start, uint64_t end);
+bool cell_protect_vma(uint64_t start, uint64_t end, uint32_t prot);
+size_t cell_resident_pages(uint64_t start, uint64_t end);
 int snapshot_create_current(void);
 int snapshot_spawn(int snap_id, uint64_t entry, uint64_t arg);
 int snapshot_reap(int pid, uint64_t status_addr, struct trap_frame *frame);

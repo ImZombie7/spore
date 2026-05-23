@@ -57,3 +57,20 @@ test_vmm = executable('test_vmm',
   native: true)
 
 test('vmm', test_vmm)
+
+test_vma = executable('test_vma',
+  files(
+    'test_vma.c',
+    '../kernel/src/mm/vma.c',
+    '../kernel/src/lib/mem.c',
+  ),
+  include_directories: test_include,
+  native: true)
+
+test('vma', test_vma)
+
+test_abi = executable('test_abi',
+  files('test_abi.c'),
+  native: true)
+
+test('abi', test_abi)

@@ -298,6 +298,53 @@ uint64_t vmm_user_to_phys(const struct user_address_space *as, uint64_t va) {
     return user_to_phys_checked(as, va, VMM_ACCESS_READ);
 }
 
+bool vmm_is_mapped(const struct user_address_space *as, uint64_t va) {
+    uint64_t *pte = leaf_for_va(as, va);
+    return pte != NULL && (*pte & PTE_VALID) != 0;
+}
+
+void vmm_unmap_range(struct user_address_space *as, uint64_t start, uint64_t end) {
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        uint64_t *pte = leaf_for_va(as, va);
+        if (pte == NULL || (*pte & PTE_VALID) == 0) {
+            continue;
+        }
+        uint64_t pa = *pte & PTE_ADDR_MASK;
+        *pte = 0;
+        pmm_free_page(pa);
+        vmm_flush_user_va(va);
+    }
+}
+
+void vmm_protect_range(struct user_address_space *as, uint64_t start, uint64_t end, uint32_t flags) {
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        uint64_t *pte = leaf_for_va(as, va);
+        if (pte == NULL || (*pte & PTE_VALID) == 0) {
+            continue;
+        }
+        uint64_t entry = *pte;
+        uint64_t ap = (flags & VMM_USER_WRITE) != 0 ? PTE_AP_USER_RW : PTE_AP_USER_RO;
+        entry = leaf_with_ap(entry, ap);
+        if ((flags & VMM_USER_EXEC) != 0) {
+            entry &= ~PTE_UXN;
+        } else {
+            entry |= PTE_UXN;
+        }
+        *pte = entry;
+        vmm_flush_user_va(va);
+    }
+}
+
+size_t vmm_mapped_pages_in_range(const struct user_address_space *as, uint64_t start, uint64_t end) {
+    size_t pages = 0;
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        if (vmm_is_mapped(as, va)) {
+            ++pages;
+        }
+    }
+    return pages;
+}
+
 bool vmm_user_range_accessible(const struct user_address_space *as,
                                uint64_t va,
                                size_t len,

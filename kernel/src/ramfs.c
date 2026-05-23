@@ -2,6 +2,8 @@
 
 #include "mem.h"
 
+static const char motd[] = "welcome to spore\n";
+
 static bool streq(const char *a, const char *b) {
     while (*a != '\0' && *b != '\0') {
         if (*a++ != *b++) {
@@ -48,3 +50,70 @@ bool ramfs_lookup(const struct ramfs *fs, const char *path, struct ramfs_file *o
     return false;
 }
 
+bool ramfs_lookup_node(const struct ramfs *fs, const char *path, struct ramfs_node *out) {
+    if (streq(path, "/") || streq(path, ".")) {
+        *out = (struct ramfs_node) {
+            .path = "/",
+            .name = "/",
+            .ino = 1,
+            .is_dir = true,
+        };
+        return true;
+    }
+    if (streq(path, "/etc")) {
+        *out = (struct ramfs_node) {
+            .path = "/etc",
+            .name = "etc",
+            .ino = 2,
+            .is_dir = true,
+        };
+        return true;
+    }
+    if (streq(path, "/bin")) {
+        *out = (struct ramfs_node) {
+            .path = "/bin",
+            .name = "bin",
+            .ino = 3,
+            .is_dir = true,
+        };
+        return true;
+    }
+    if (streq(path, "/etc/motd")) {
+        *out = (struct ramfs_node) {
+            .path = "/etc/motd",
+            .name = "motd",
+            .data = motd,
+            .size = sizeof(motd) - 1,
+            .ino = 4,
+            .is_dir = false,
+        };
+        return true;
+    }
+
+    struct ramfs_file file;
+    if (ramfs_lookup(fs, path, &file)) {
+        *out = (struct ramfs_node) {
+            .path = "/init",
+            .name = "init",
+            .data = file.data,
+            .size = file.size,
+            .ino = 5,
+            .is_dir = false,
+        };
+        return true;
+    }
+    return false;
+}
+
+bool ramfs_root_dirent(size_t index, struct ramfs_dirent *out) {
+    static const struct ramfs_dirent entries[] = {
+        {.name = "bin", .ino = 3, .is_dir = true},
+        {.name = "etc", .ino = 2, .is_dir = true},
+        {.name = "init", .ino = 5, .is_dir = false},
+    };
+    if (index >= sizeof(entries) / sizeof(entries[0])) {
+        return false;
+    }
+    *out = entries[index];
+    return true;
+}
