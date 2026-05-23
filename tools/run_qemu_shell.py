@@ -13,7 +13,7 @@ COMMANDS = [
     b"echo hi > /tmp/f\n",
     b"cat /tmp/f\n",
     b"mkdir /tmp/d && cd /tmp/d && touch x && ls\n",
-    b"/hello\n",
+    b"/bin/hello\n",
     b"/bin/spore_demo\n",
     b"confine compute-only spinner\n",
     b"confine compute-only peeker /etc/motd\n",

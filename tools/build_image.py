@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def read_manifest(path: Path):
+    entries = []
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            raise SystemExit(f"bad manifest line: {raw}")
+        entries.append((parts[0], parts[1]))
+    return entries
+
+
+def module_name(target: str) -> str:
+    return target.strip("/").replace("/", "__") or "init"
+
+
+def compile_userland(source_root: Path, source: str, output: Path):
+    src = source_root / source
+    cmd = [
+        "zig",
+        "cc",
+        "-target",
+        "aarch64-linux-musl",
+        "-static",
+        "-std=c23",
+        "-D_GNU_SOURCE",
+    ]
+    if src.is_dir():
+        cmd += [
+            f"-I{source_root / 'userland/lib/spore'}",
+            str(src / "main.c"),
+            str(source_root / "userland/lib/spore/util.c"),
+        ]
+    else:
+        cmd += [str(src)]
+    cmd += ["-o", str(output)]
+    subprocess.run(cmd, check=True)
+
+
+def copy_into_efi(efi_img: Path, src: Path, dst: str):
+    subprocess.run(["mcopy", "-i", str(efi_img), str(src), f"::{dst}"], check=True)
+
+
+def main() -> int:
+    if len(sys.argv) != 8:
+        print(
+            "usage: build_image.py SOURCE_ROOT ISO_ROOT KERNEL_ELF LIMINE_CONF_IN "
+            "LIMINE_DIR OUTPUT_ISO OUTPUT_COPY",
+            file=sys.stderr,
+        )
+        return 2
+
+    source_root = Path(sys.argv[1])
+    iso_root = Path(sys.argv[2])
+    kernel_elf = Path(sys.argv[3])
+    limine_conf_in = Path(sys.argv[4])
+    limine_dir = Path(sys.argv[5])
+    output_iso = Path(sys.argv[6])
+    output_copy = Path(sys.argv[7])
+
+    if iso_root.exists():
+        shutil.rmtree(iso_root)
+    (iso_root / "boot/limine").mkdir(parents=True)
+    (iso_root / "boot/modules").mkdir(parents=True)
+    (iso_root / "EFI/BOOT").mkdir(parents=True)
+
+    shutil.copy2(kernel_elf, iso_root / "boot/kernel.elf")
+    shutil.copy2(limine_dir / "BOOTAA64.EFI", iso_root / "EFI/BOOT/BOOTAA64.EFI")
+
+    module_lines = []
+    for source, target in read_manifest(source_root / "userland/image.manifest"):
+        name = module_name(target)
+        out = iso_root / "boot/modules" / name
+        compile_userland(source_root, source, out)
+        module_lines.append(f"    module_path: boot():/boot/modules/{name}")
+        module_lines.append(f"    module_string: {target}")
+
+    rendered = limine_conf_in.read_text().replace("@MODULES@", "\n".join(module_lines))
+    for path in (iso_root / "boot/limine/limine.conf", iso_root / "EFI/BOOT/limine.conf"):
+        path.write_text(rendered)
+
+    efi_img = iso_root / "efi.img"
+    subprocess.run(["dd", "if=/dev/zero", f"of={efi_img}", "bs=1M", "count=64"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["mkfs.fat", "-F", "32", str(efi_img)], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["mmd", "-i", str(efi_img), "::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/limine", "::/boot/modules"], check=True)
+    copy_into_efi(efi_img, limine_dir / "BOOTAA64.EFI", "/EFI/BOOT/BOOTAA64.EFI")
+    copy_into_efi(efi_img, iso_root / "EFI/BOOT/limine.conf", "/EFI/BOOT/limine.conf")
+    copy_into_efi(efi_img, iso_root / "boot/limine/limine.conf", "/boot/limine/limine.conf")
+    copy_into_efi(efi_img, kernel_elf, "/boot/kernel.elf")
+    for module in sorted((iso_root / "boot/modules").iterdir()):
+        copy_into_efi(efi_img, module, f"/boot/modules/{module.name}")
+
+    subprocess.run(
+        [
+            "xorriso",
+            "-as",
+            "mkisofs",
+            "-R",
+            "-r",
+            "-J",
+            "-hfsplus",
+            "-apm-block-size",
+            "2048",
+            "--efi-boot",
+            "efi.img",
+            "-no-emul-boot",
+            "-efi-boot-part",
+            "--efi-boot-image",
+            "--protective-msdos-label",
+            str(iso_root),
+            "-o",
+            str(output_iso),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    shutil.copy2(output_iso, output_copy)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

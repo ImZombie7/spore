@@ -34,105 +34,6 @@ kernel_sources = files(
   'src/ramfs.c',
 )
 
-userland_tools = 'ls cat echo mkdir rm touch pwd hello true false'
-userland_bins_dir = meson.current_build_dir() / 'userland_bins'
-libspore_include = '-I' + meson.project_source_root() / 'userland/lib/spore'
-libspore_util = meson.project_source_root() / 'userland/lib/spore/util.c'
-
-init_bin = custom_target('init',
-  input: [
-    files('../userland/bin/spsh/main.c'),
-    files('../userland/lib/spore/util.c'),
-  ],
-  output: 'init',
-  command: [
-    'zig', 'cc',
-    '-target', 'aarch64-linux-musl',
-    '-static',
-    '-std=c23',
-    '-D_GNU_SOURCE',
-    libspore_include,
-    '@INPUT@',
-    '-o', '@OUTPUT@',
-  ],
-  build_by_default: true)
-
-spore_demo_bin = custom_target('spore_demo',
-  input: files('../userland/spore_v2b_demo.c'),
-  output: 'spore_demo',
-  command: [
-    'zig', 'cc',
-    '-target', 'aarch64-linux-musl',
-    '-static',
-    '-std=c23',
-    '-D_GNU_SOURCE',
-    '@INPUT@',
-    '-o', '@OUTPUT@',
-  ],
-  build_by_default: true)
-
-real_tools_stamp = custom_target('real-userland-tools',
-  input: [
-    files('../userland/bin/ls/main.c'),
-    files('../userland/bin/cat/main.c'),
-    files('../userland/bin/echo/main.c'),
-    files('../userland/bin/mkdir/main.c'),
-    files('../userland/bin/rm/main.c'),
-    files('../userland/bin/touch/main.c'),
-    files('../userland/bin/pwd/main.c'),
-    files('../userland/bin/hello/main.c'),
-    files('../userland/bin/true/main.c'),
-    files('../userland/bin/false/main.c'),
-    files('../userland/lib/spore/util.c'),
-  ],
-  output: 'real-userland-tools.stamp',
-  command: [
-    'sh', '-c',
-    'set -eu; outdir="$1"; srcroot="$2"; stamp="$3"; tools="$4"; ' +
-    'rm -rf "$outdir"; mkdir -p "$outdir"; ' +
-    'for tool in $tools; do ' +
-    '  zig cc -target aarch64-linux-musl -static -std=c23 -D_GNU_SOURCE ' +
-    '    -I"$srcroot/userland/lib/spore" ' +
-    '    "$srcroot/userland/bin/$tool/main.c" "$srcroot/userland/lib/spore/util.c" ' +
-    '    -o "$outdir/$tool"; ' +
-    'done; ' +
-    'touch "$stamp"',
-    'sh',
-    userland_bins_dir,
-    meson.project_source_root(),
-    '@OUTPUT@',
-    userland_tools,
-  ],
-  build_by_default: true)
-
-policy_tools_bin = custom_target('policy_tools',
-  input: files('../userland/policy_tools.c'),
-  output: 'policy_tools',
-  command: [
-    'zig', 'cc',
-    '-target', 'aarch64-linux-musl',
-    '-static',
-    '-std=c23',
-    '-D_GNU_SOURCE',
-    '@INPUT@',
-    '-o', '@OUTPUT@',
-  ],
-  build_by_default: true)
-
-exec_child_bin = custom_target('exec_child',
-  input: files('../userland/exec_child.c'),
-  output: 'exec_child',
-  command: [
-    'zig', 'cc',
-    '-target', 'aarch64-linux-musl',
-    '-static',
-    '-std=c23',
-    '-D_GNU_SOURCE',
-    '@INPUT@',
-    '-o', '@OUTPUT@',
-  ],
-  build_by_default: true)
-
 kernel_elf = executable('kernel.elf',
   kernel_sources,
   include_directories: [
@@ -153,57 +54,25 @@ make_limine = custom_target('limine-host-tool',
   build_by_default: true)
 
 image = custom_target('image.iso',
-  input: [kernel_elf, files('boot/limine.conf'), make_limine, init_bin, exec_child_bin, spore_demo_bin, real_tools_stamp, policy_tools_bin],
+  input: [
+    kernel_elf,
+    files('boot/limine.conf.in'),
+    files('../userland/image.manifest'),
+    files('../tools/build_image.py'),
+    make_limine,
+  ],
   output: 'image.iso',
   command: [
-    'sh', '-c',
-    'set -eu; ' +
-    'rm -rf "$1"; ' +
-    'mkdir -p "$1/boot/limine" "$1/EFI/BOOT" "$1/boot/bin"; ' +
-    'cp "$2" "$1/boot/kernel.elf"; ' +
-    'cp "$3" "$1/boot/limine/limine.conf"; ' +
-    'cp "$3" "$1/EFI/BOOT/limine.conf"; ' +
-    'cp "$4/BOOTAA64.EFI" "$1/EFI/BOOT/BOOTAA64.EFI"; ' +
-    'cp "$5" "$1/boot/init"; ' +
-    'cp "$6" "$1/boot/exec_child"; ' +
-    'cp "$7" "$1/boot/bin/spore_demo"; ' +
-    'for name in ' + userland_tools + '; do cp "${10}/$name" "$1/boot/bin/$name"; done; ' +
-    'cp "${10}/hello" "$1/boot/hello"; ' +
-    'for name in spinner peeker writer memhog escalate; do cp "$9" "$1/boot/bin/$name"; done; ' +
-    'efi_img="$1/efi.img"; ' +
-    'rm -f "$efi_img"; ' +
-    'dd if=/dev/zero of="$efi_img" bs=1M count=64 >/dev/null 2>&1; ' +
-    'mkfs.fat -F 32 "$efi_img" >/dev/null; ' +
-    'mmd -i "$efi_img" ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine ::/boot/bin; ' +
-    'mcopy -i "$efi_img" "$4/BOOTAA64.EFI" ::/EFI/BOOT/BOOTAA64.EFI; ' +
-    'mcopy -i "$efi_img" "$3" ::/EFI/BOOT/limine.conf; ' +
-    'mcopy -i "$efi_img" "$3" ::/boot/limine/limine.conf; ' +
-    'mcopy -i "$efi_img" "$2" ::/boot/kernel.elf; ' +
-    'mcopy -i "$efi_img" "$5" ::/boot/init; ' +
-    'mcopy -i "$efi_img" "$6" ::/boot/exec_child; ' +
-    'mcopy -i "$efi_img" "$7" ::/boot/bin/spore_demo; ' +
-    'for name in ' + userland_tools + '; do mcopy -i "$efi_img" "${10}/$name" ::/boot/bin/$name; done; ' +
-    'mcopy -i "$efi_img" "${10}/hello" ::/boot/hello; ' +
-    'for name in spinner peeker writer memhog escalate; do mcopy -i "$efi_img" "$9" ::/boot/bin/$name; done; ' +
-    'xorriso -as mkisofs ' +
-    '-R -r -J -hfsplus -apm-block-size 2048 ' +
-    '--efi-boot efi.img -no-emul-boot -efi-boot-part --efi-boot-image ' +
-    '--protective-msdos-label "$1" -o "${11}" >/dev/null 2>&1; ' +
-    'cp "${11}" "${12}"',
-    'sh',
+    files('../tools/build_image.py'),
+    meson.project_source_root(),
     iso_root,
     kernel_elf,
-    files('boot/limine.conf'),
+    files('boot/limine.conf.in'),
     limine_dir,
-    init_bin,
-    exec_child_bin,
-    spore_demo_bin,
-    real_tools_stamp,
-    policy_tools_bin,
-    userland_bins_dir,
     image_iso,
     '@OUTPUT@',
   ],
+  build_always_stale: true,
   build_by_default: true)
 
 qemu_code = run_command('sh', '-c',

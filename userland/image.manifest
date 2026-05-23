@@ -1,0 +1,20 @@
+# source baked-path
+userland/bin/spsh /init
+userland/bin/spsh /bin/spsh
+userland/bin/ls /bin/ls
+userland/bin/cat /bin/cat
+userland/bin/echo /bin/echo
+userland/bin/mkdir /bin/mkdir
+userland/bin/rm /bin/rm
+userland/bin/touch /bin/touch
+userland/bin/pwd /bin/pwd
+userland/bin/hello /bin/hello
+userland/bin/true /bin/true
+userland/bin/false /bin/false
+userland/spore_v2b_demo.c /bin/spore_demo
+userland/exec_child.c /bin/exec_child
+userland/policy_tools.c /bin/spinner
+userland/policy_tools.c /bin/peeker
+userland/policy_tools.c /bin/writer
+userland/policy_tools.c /bin/memhog
+userland/policy_tools.c /bin/escalate
