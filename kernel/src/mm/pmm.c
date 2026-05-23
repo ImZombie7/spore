@@ -9,6 +9,7 @@
 
 static uint64_t *hhdm_base;
 static uint64_t bitmap[PMM_BITMAP_WORDS];
+static uint16_t refcounts[PMM_MAX_PAGES];
 static uint64_t total_page_count;
 static uint64_t free_page_count;
 
@@ -29,6 +30,9 @@ static void set_used(uint64_t page) {
             --free_page_count;
         }
     }
+    if (refcounts[page] == 0) {
+        refcounts[page] = 1;
+    }
 }
 
 static void set_free(uint64_t page) {
@@ -38,6 +42,7 @@ static void set_free(uint64_t page) {
         *word &= ~mask;
         ++free_page_count;
     }
+    refcounts[page] = 0;
 }
 
 static bool is_free(uint64_t page) {
@@ -48,6 +53,9 @@ void pmm_init(uint64_t hhdm_offset, const struct limine_memmap_response *memmap)
     hhdm_base = (uint64_t *)(uintptr_t)hhdm_offset;
     for (size_t i = 0; i < PMM_BITMAP_WORDS; ++i) {
         bitmap[i] = UINT64_MAX;
+    }
+    for (size_t i = 0; i < PMM_MAX_PAGES; ++i) {
+        refcounts[i] = 0;
     }
     total_page_count = PMM_MAX_PAGES;
     free_page_count = 0;
@@ -92,9 +100,45 @@ uint64_t pmm_alloc_zero_page(void) {
 }
 
 void pmm_free_page(uint64_t pa) {
-    if ((pa % PAGE_SIZE) == 0 && pa < PMM_MAX_PHYS) {
-        set_free(pa / PAGE_SIZE);
+    if ((pa % PAGE_SIZE) != 0 || pa >= PMM_MAX_PHYS) {
+        return;
     }
+
+    // v1 is cooperative and uniprocessor; refcounts are intentionally unlocked.
+    // Preemptive/SMP v2 must revisit this.
+    uint64_t page = pa / PAGE_SIZE;
+    if (refcounts[page] == 0) {
+        return;
+    }
+    --refcounts[page];
+    if (refcounts[page] == 0) {
+        set_free(page);
+    }
+}
+
+bool pmm_share_page(uint64_t pa) {
+    if ((pa % PAGE_SIZE) != 0 || pa >= PMM_MAX_PHYS) {
+        return false;
+    }
+
+    // v1 is cooperative and uniprocessor; refcounts are intentionally unlocked.
+    uint64_t page = pa / PAGE_SIZE;
+    if (refcounts[page] == 0 || refcounts[page] == UINT16_MAX) {
+        return false;
+    }
+    ++refcounts[page];
+    return true;
+}
+
+bool pmm_is_last_ref(uint64_t pa) {
+    return pmm_refcount(pa) == 1;
+}
+
+uint16_t pmm_refcount(uint64_t pa) {
+    if ((pa % PAGE_SIZE) != 0 || pa >= PMM_MAX_PHYS) {
+        return 0;
+    }
+    return refcounts[pa / PAGE_SIZE];
 }
 
 uint64_t pmm_total_pages(void) {
