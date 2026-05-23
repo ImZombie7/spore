@@ -1,5 +1,6 @@
 #include "kprintf.h"
 #include "arch/aarch64/exceptions.h"
+#include "arch/aarch64/timer.h"
 #include "cell.h"
 #include "elf/loader.h"
 #include "exec/stack.h"
@@ -144,13 +145,18 @@ static uint64_t current_el(void) {
 
 enum {
     PL011_PHYS = 0x09000000,
+    GICD_PHYS = 0x08000000,
+    GICR_PHYS = 0x080a0000,
+    GICR_SGI_PHYS = 0x080b0000,
     EARLY_PAGE_SIZE = 0x1000,
     PT_ENTRIES = 512,
+    EARLY_L3_TABLES = 8,
 };
 
 static uint64_t early_l1[PT_ENTRIES] __attribute__((aligned(EARLY_PAGE_SIZE)));
 static uint64_t early_l2[PT_ENTRIES] __attribute__((aligned(EARLY_PAGE_SIZE)));
-static uint64_t early_l3[PT_ENTRIES] __attribute__((aligned(EARLY_PAGE_SIZE)));
+static uint64_t early_l3[EARLY_L3_TABLES][PT_ENTRIES] __attribute__((aligned(EARLY_PAGE_SIZE)));
+static size_t early_l3_used;
 static uint8_t kernel_stack[64 * 1024] __attribute__((aligned(16)));
 
 static uint64_t kernel_virt_to_phys(uintptr_t va) {
@@ -177,25 +183,17 @@ static void zero_page(uint64_t *page) {
     }
 }
 
-static void map_pl011_page(void) {
-    zero_page(early_l1);
-    zero_page(early_l2);
-    zero_page(early_l3);
+static uint64_t *alloc_early_l3(void) {
+    if (early_l3_used >= EARLY_L3_TABLES) {
+        return NULL;
+    }
+    uint64_t *table = early_l3[early_l3_used++];
+    zero_page(table);
+    return table;
+}
 
-    uint64_t mair;
-    __asm__ volatile("mrs %0, mair_el1" : "=r"(mair));
-    mair &= ~0xffull;
-    mair |= 0xffull;
-    mair &= ~(0xffull << 16);
-    mair |= 0x00ull << 16;
-    __asm__ volatile(
-        "msr mair_el1, %0\n"
-        "isb\n"
-        :
-        : "r"(mair)
-        : "memory");
-
-    const uint64_t va = hhdm_request.response->offset + PL011_PHYS;
+static void map_device_page(uint64_t pa) {
+    const uint64_t va = hhdm_request.response->offset + pa;
     uint64_t ttbr1;
     __asm__ volatile("mrs %0, ttbr1_el1" : "=r"(ttbr1));
 
@@ -216,7 +214,11 @@ static void map_pl011_page(void) {
     uint64_t *l2 = phys_to_hhdm(pt_entry_address(l1[l1i]));
 
     if ((l2[l2i] & 0x1) == 0) {
-        l2[l2i] = table_descriptor(early_l3);
+        uint64_t *table = alloc_early_l3();
+        if (table == NULL) {
+            return;
+        }
+        l2[l2i] = table_descriptor(table);
     }
     uint64_t *l3 = phys_to_hhdm(pt_entry_address(l2[l2i]));
 
@@ -226,8 +228,35 @@ static void map_pl011_page(void) {
     const uint64_t af = 1ull << 10;
     const uint64_t pxn = 1ull << 53;
     const uint64_t uxn = 1ull << 54;
-    l3[l3i] = (PL011_PHYS & ~0xfffull) | attr_index_device | ap_el1_rw |
+    l3[l3i] = (pa & ~0xfffull) | attr_index_device | ap_el1_rw |
               sh_inner | af | pxn | uxn | 0x3ull;
+}
+
+static void map_device_pages(void) {
+    zero_page(early_l1);
+    zero_page(early_l2);
+    for (size_t i = 0; i < EARLY_L3_TABLES; ++i) {
+        zero_page(early_l3[i]);
+    }
+    early_l3_used = 0;
+
+    uint64_t mair;
+    __asm__ volatile("mrs %0, mair_el1" : "=r"(mair));
+    mair &= ~0xffull;
+    mair |= 0xffull;
+    mair &= ~(0xffull << 16);
+    mair |= 0x00ull << 16;
+    __asm__ volatile(
+        "msr mair_el1, %0\n"
+        "isb\n"
+        :
+        : "r"(mair)
+        : "memory");
+
+    map_device_page(PL011_PHYS);
+    map_device_page(GICD_PHYS);
+    map_device_page(GICR_PHYS);
+    map_device_page(GICR_SGI_PHYS);
 
     __asm__ volatile(
         "dsb ishst\n"
@@ -262,13 +291,14 @@ void kernel_main(void) {
         }
     }
 
-    map_pl011_page();
+    map_device_pages();
     pl011_init(hhdm_request.response->offset);
 
     kprintf("[kernel] booted at EL%u\n", (unsigned)current_el());
 
     pmm_init(hhdm_request.response->offset, memmap_request.response);
     exceptions_init();
+    timer_init(hhdm_request.response->offset);
     cell_system_init(hhdm_request.response->offset);
 
     struct ramfs fs;

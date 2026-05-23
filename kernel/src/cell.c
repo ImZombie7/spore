@@ -223,7 +223,7 @@ bool cell_create_init(struct user_address_space *as, uint64_t entry, uint64_t sp
     thread->state = THREAD_RUNNABLE;
     thread->tf.elr_el1 = entry;
     thread->tf.sp_el0 = sp;
-    thread->tf.spsr_el1 = 0x3c0;
+    thread->tf.spsr_el1 = 0x340;
     current_thread = thread;
     kprintf("[spore] booting... domain %d / thread %d\n", domain->id, thread->tid);
     return true;
@@ -402,6 +402,44 @@ int cell_kill(int pid, int signal) {
     }
     wake_parent_of(domain);
     return 0;
+}
+
+int cell_set_budget(int domain_id, uint64_t ticks) {
+    struct domain *domain = domain_id == 0 ? current_domain() : find_domain(domain_id);
+    if (domain == NULL) {
+        return -3;
+    }
+    domain->budget.max_ticks = ticks;
+    domain->budget.remaining_ticks = ticks;
+    if (ticks != 0) {
+        kprintf("[spore] domain %d CPU budget set to %u ticks\n",
+                domain->id,
+                (unsigned)ticks);
+    }
+    return 0;
+}
+
+void cell_timer_tick(struct trap_frame *frame, bool from_lower_el) {
+    struct domain *domain = current_domain();
+    if (domain == NULL) {
+        return;
+    }
+    if (domain->budget.max_ticks != 0 && domain->budget.remaining_ticks != 0) {
+        --domain->budget.remaining_ticks;
+        if (domain->budget.remaining_ticks == 0) {
+            kprintf("[spore] domain %d exceeded CPU budget -> killed\n", domain->id);
+            if (from_lower_el) {
+                cell_exit_current(137, frame);
+            } else {
+                domain->zombie = true;
+                domain->exit_status = 137;
+            }
+            return;
+        }
+    }
+    if (from_lower_el) {
+        cell_schedule(frame);
+    }
 }
 
 bool cell_handle_cow_fault(uint64_t far) {
@@ -675,7 +713,7 @@ int snapshot_create_current(void) {
     return snap->id;
 }
 
-int snapshot_spawn(int snap_id, uint64_t entry, uint64_t arg) {
+int snapshot_spawn(int snap_id, uint64_t entry, uint64_t arg, struct trap_frame *frame) {
     struct domain *parent = current_domain();
     struct snapshot *snap = find_snapshot(snap_id);
     struct domain *child_domain = alloc_domain();
@@ -696,10 +734,12 @@ int snapshot_spawn(int snap_id, uint64_t entry, uint64_t arg) {
     copy_fd_table(child_domain, parent);
     child_domain->parent_id = parent->id;
     child_thread->state = THREAD_RUNNABLE;
-    child_thread->tf = current_thread->tf;
+    cell_save_current(frame);
+    child_thread->tf = *frame;
     child_thread->tf.elr_el1 = entry;
     child_thread->tf.x[0] = arg;
     child_thread->tf.x[1] = (uint64_t)child_domain->id;
+    child_thread->tf.spsr_el1 &= ~(1ull << 7);
     child_thread->tpidr_el0 = current_thread->tpidr_el0;
     return child_domain->id;
 }

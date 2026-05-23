@@ -20,6 +20,7 @@ kernel_sources = files(
   'src/arch/aarch64/boot.S',
   'src/arch/aarch64/exceptions.c',
   'src/arch/aarch64/syscall.c',
+  'src/arch/aarch64/timer.c',
   'src/arch/aarch64/vectors.S',
   'src/cell.c',
   'src/main.c',
@@ -34,7 +35,7 @@ kernel_sources = files(
 )
 
 init_bin = custom_target('init',
-  input: files('../userland/spore_v15_demo.c'),
+  input: files('../userland/spore_v2b_demo.c'),
   output: 'init',
   command: [
     'zig', 'cc',
@@ -119,7 +120,7 @@ qemu_code = run_command('sh', '-c',
 
 qemu_args = [
   'qemu-system-aarch64',
-  '-M', 'virt',
+  '-M', 'virt,gic-version=3',
   '-accel', 'hvf',
   '-cpu', 'host',
   '-m', '512M',
@@ -144,7 +145,7 @@ run_target('run-tcg',
   command: [
     files('../tools/run_qemu.py'),
     'qemu-system-aarch64',
-    '-M', 'virt',
+    '-M', 'virt,gic-version=3',
     '-accel', 'tcg',
     '-cpu', 'max',
     '-m', '512M',

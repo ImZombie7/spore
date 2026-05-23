@@ -67,6 +67,7 @@ enum {
     SYS_SPORE_SPAWN = 0x4001,
     SYS_SPORE_REAP = 0x4002,
     SYS_SPORE_RESIDENT = 0x4003,
+    SYS_SPORE_SET_BUDGET = 0x4004,
     MAP_PRIVATE = 0x02,
     MAP_FIXED = 0x10,
     MAP_ANONYMOUS = 0x20,
@@ -562,13 +563,15 @@ static int64_t dispatch(struct trap_frame *f) {
     case SYS_SPORE_SNAPSHOT:
         return snapshot_create_current();
     case SYS_SPORE_SPAWN:
-        return snapshot_spawn((int)a0, a1, a2);
+        return snapshot_spawn((int)a0, a1, a2, f);
     case SYS_SPORE_REAP: {
         int rc = snapshot_reap((int)a0, a1, f);
         return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
     }
     case SYS_SPORE_RESIDENT:
         return (int64_t)cell_resident_pages(a0, a0 + a1);
+    case SYS_SPORE_SET_BUDGET:
+        return cell_set_budget((int)a0, a1);
     case SYS_BRK:
         return sys_brk(a0);
     case SYS_MMAP:

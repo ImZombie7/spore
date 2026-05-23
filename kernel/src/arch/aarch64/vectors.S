@@ -8,25 +8,7 @@
     .balign 0x80
 .endm
 
-vectors:
-    vector_slot unhandled_exception
-    vector_slot ignored_exception
-    vector_slot ignored_exception
-    vector_slot ignored_exception
-    vector_slot unhandled_exception
-    vector_slot ignored_exception
-    vector_slot ignored_exception
-    vector_slot ignored_exception
-    vector_slot lower_sync_exception
-    vector_slot ignored_exception
-    vector_slot ignored_exception
-    vector_slot ignored_exception
-    vector_slot unhandled_exception
-    vector_slot ignored_exception
-    vector_slot ignored_exception
-    vector_slot ignored_exception
-
-lower_sync_exception:
+.macro save_trap_frame
     sub sp, sp, #288
     stp x0, x1, [sp, #0]
     stp x2, x3, [sp, #16]
@@ -52,10 +34,9 @@ lower_sync_exception:
     str x0, [sp, #264]
     mrs x0, esr_el1
     str x0, [sp, #272]
+.endm
 
-    mov x0, sp
-    bl handle_lower_sync
-
+.macro restore_trap_frame
     ldr x0, [sp, #248]
     msr sp_el0, x0
     ldr x0, [sp, #256]
@@ -80,6 +61,47 @@ lower_sync_exception:
     ldp x28, x29, [sp, #224]
     ldr x30, [sp, #240]
     add sp, sp, #288
+.endm
+
+vectors:
+    vector_slot unhandled_exception
+    vector_slot ignored_exception
+    vector_slot ignored_exception
+    vector_slot ignored_exception
+    vector_slot unhandled_exception
+    vector_slot current_irq_exception
+    vector_slot ignored_exception
+    vector_slot ignored_exception
+    vector_slot lower_sync_exception
+    vector_slot lower_irq_exception
+    vector_slot ignored_exception
+    vector_slot ignored_exception
+    vector_slot unhandled_exception
+    vector_slot ignored_exception
+    vector_slot ignored_exception
+    vector_slot ignored_exception
+
+lower_sync_exception:
+    save_trap_frame
+    mov x0, sp
+    bl handle_lower_sync
+    restore_trap_frame
+    eret
+
+current_irq_exception:
+    save_trap_frame
+    mov x0, sp
+    mov x1, #0
+    bl handle_irq
+    restore_trap_frame
+    eret
+
+lower_irq_exception:
+    save_trap_frame
+    mov x0, sp
+    mov x1, #1
+    bl handle_irq
+    restore_trap_frame
     eret
 
 unhandled_exception:
@@ -96,7 +118,7 @@ ignored_exception:
 enter_el0:
     msr elr_el1, x0
     msr sp_el0, x1
-    mov x2, #0x3c0
+    mov x2, #0x340
     msr spsr_el1, x2
     mov x0, #0
     mov x1, #0
