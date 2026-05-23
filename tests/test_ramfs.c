@@ -50,7 +50,20 @@ int main(void) {
     assert(ramfs_root_dirent(1, &ent));
     assert(strcmp(ent.name, "etc") == 0 && ent.is_dir);
     assert(ramfs_root_dirent(2, &ent));
+    assert(strcmp(ent.name, "tmp") == 0 && ent.is_dir);
+    assert(ramfs_root_dirent(3, &ent));
     assert(strcmp(ent.name, "init") == 0 && !ent.is_dir);
-    assert(!ramfs_root_dirent(3, &ent));
+
+    assert(ramfs_mkdir(&fs, "/tmp/d"));
+    assert(ramfs_create(&fs, "/tmp/d/a", &node));
+    assert(ramfs_write(&fs, node.index, 0, "hello", 5) == 5);
+    char buf[8] = {0};
+    assert(ramfs_read(&fs, node.index, 0, buf, sizeof(buf)) == 5);
+    assert(strcmp(buf, "hello") == 0);
+    assert(ramfs_rename(&fs, "/tmp/d/a", "/tmp/d/b"));
+    assert(!ramfs_lookup_node(&fs, "/tmp/d/a", &node));
+    assert(ramfs_lookup_node(&fs, "/tmp/d/b", &node));
+    assert(ramfs_unlink(&fs, "/tmp/d/b"));
+    assert(ramfs_unlink(&fs, "/tmp/d"));
     return 0;
 }

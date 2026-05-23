@@ -21,6 +21,12 @@ enum {
     SYS_DUP3 = 24,
     SYS_FCNTL = 25,
     SYS_IOCTL = 29,
+    SYS_MKDIRAT = 34,
+    SYS_UNLINKAT = 35,
+    SYS_RENAMEAT = 38,
+    SYS_FTRUNCATE = 46,
+    SYS_CHDIR = 49,
+    SYS_FCHDIR = 50,
     SYS_OPENAT = 56,
     SYS_CLOSE = 57,
     SYS_GETDENTS64 = 61,
@@ -32,6 +38,7 @@ enum {
     SYS_READLINKAT = 78,
     SYS_NEWFSTATAT = 79,
     SYS_FSTAT = 80,
+    SYS_FSYNC = 82,
     SYS_EXIT = 93,
     SYS_EXIT_GROUP = 94,
     SYS_SET_TID_ADDRESS = 96,
@@ -64,6 +71,7 @@ enum {
     SYS_MADVISE = 233,
     SYS_WAIT4 = 260,
     SYS_PRLIMIT64 = 261,
+    SYS_RENAMEAT2 = 276,
     SYS_GETRANDOM = 278,
     SYS_CLONE3 = 435,
     SYS_SPORE_SNAPSHOT = 0x4000,
@@ -85,6 +93,9 @@ enum {
     O_ACCMODE = 3,
     O_WRONLY = 1,
     O_RDWR = 2,
+    O_CREAT = 0100,
+    O_TRUNC = 01000,
+    O_APPEND = 02000,
     F_DUPFD = 0,
     F_GETFL = 3,
     F_SETFL = 4,
@@ -95,7 +106,10 @@ enum {
     EBADF = 9,
     EFAULT = 14,
     EINVAL = 22,
+    ENOTDIR = 20,
     ENOSYS = 38,
+    ENAMETOOLONG = 36,
+    ENOTEMPTY = 39,
     MAX_IOVCNT = 1024,
     MAX_EXEC_ARGS = 8,
     MAX_EXEC_ENVS = 8,
@@ -160,6 +174,15 @@ static bool checked_add(uint64_t a, uint64_t b, uint64_t *out) {
     return *out >= a;
 }
 
+static bool streq(const char *a, const char *b) {
+    while (*a != '\0' && *b != '\0') {
+        if (*a++ != *b++) {
+            return false;
+        }
+    }
+    return *a == '\0' && *b == '\0';
+}
+
 void syscall_set_address_space(struct user_address_space *as) {
     current_as = as;
 }
@@ -212,6 +235,88 @@ static bool copy_string_from_user(uint64_t user, char *dst, size_t cap) {
     }
     dst[cap - 1] = '\0';
     return false;
+}
+
+static bool normalize_path(const char *base, const char *path, char *out, size_t cap) {
+    char input[256];
+    size_t pos = 0;
+    if (path[0] != '/') {
+        for (size_t i = 0; base[i] != '\0'; ++i) {
+            if (pos + 1 >= sizeof(input)) {
+                return false;
+            }
+            input[pos++] = base[i];
+        }
+        if (pos == 0 || input[pos - 1] != '/') {
+            if (pos + 1 >= sizeof(input)) {
+                return false;
+            }
+            input[pos++] = '/';
+        }
+    }
+    for (size_t i = 0; path[i] != '\0'; ++i) {
+        if (pos + 1 >= sizeof(input)) {
+            return false;
+        }
+        input[pos++] = path[i];
+    }
+    input[pos] = '\0';
+
+    char components[16][32];
+    size_t count = 0;
+    const char *p = input;
+    while (*p != '\0') {
+        while (*p == '/') {
+            ++p;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        char comp[32];
+        size_t len = 0;
+        while (p[len] != '\0' && p[len] != '/') {
+            if (len + 1 >= sizeof(comp)) {
+                return false;
+            }
+            comp[len] = p[len];
+            ++len;
+        }
+        comp[len] = '\0';
+        if (streq(comp, ".")) {
+        } else if (streq(comp, "..")) {
+            if (count > 0) {
+                --count;
+            }
+        } else {
+            if (count >= 16) {
+                return false;
+            }
+            kmemcpy(components[count++], comp, len + 1);
+        }
+        p += len;
+    }
+
+    size_t out_pos = 0;
+    out[out_pos++] = '/';
+    for (size_t i = 0; i < count; ++i) {
+        size_t len = kstrlen(components[i]);
+        if (out_pos + len + (i + 1 < count ? 1 : 0) >= cap) {
+            return false;
+        }
+        kmemcpy(out + out_pos, components[i], len);
+        out_pos += len;
+        if (i + 1 < count) {
+            out[out_pos++] = '/';
+        }
+    }
+    out[out_pos] = '\0';
+    return true;
+}
+
+static bool copy_resolved_path(uint64_t path_addr, char *out, size_t cap) {
+    char raw[128];
+    return copy_string_from_user(path_addr, raw, sizeof(raw)) &&
+           normalize_path(cell_current_cwd(), raw, out, cap);
 }
 
 static bool copy_string_array_from_user(uint64_t user,
@@ -427,7 +532,7 @@ static int64_t sys_clone(struct trap_frame *f, uint64_t flags, uint64_t newsp) {
 
 static int64_t sys_execve(struct trap_frame *frame, uint64_t path_addr, uint64_t argv_addr, uint64_t envp_addr) {
     char path[128];
-    if (!copy_string_from_user(path_addr, path, sizeof(path))) {
+    if (!copy_resolved_path(path_addr, path, sizeof(path))) {
         return -(int64_t)EFAULT;
     }
 
@@ -478,16 +583,18 @@ static int64_t sys_openat(uint64_t dirfd, uint64_t path_addr, uint64_t flags) {
     if ((int64_t)dirfd != AT_FDCWD) {
         return -(int64_t)EINVAL;
     }
-    if ((flags & O_ACCMODE) != 0) {
-        return -(int64_t)EROFS;
-    }
     char path[128];
-    if (!copy_string_from_user(path_addr, path, sizeof(path))) {
+    if (!copy_resolved_path(path_addr, path, sizeof(path))) {
         return -(int64_t)EFAULT;
     }
     struct ramfs_node node;
     if (!ramfs_lookup_node(sys_ramfs, path, &node)) {
-        return -(int64_t)ENOENT;
+        if ((flags & O_CREAT) == 0 || !ramfs_create(sys_ramfs, path, &node)) {
+            return -(int64_t)ENOENT;
+        }
+    }
+    if ((flags & O_TRUNC) != 0 && !node.is_dir) {
+        (void)ramfs_truncate(sys_ramfs, node.index, 0);
     }
     return cell_fd_open_node(&node, (uint32_t)flags);
 }
@@ -518,7 +625,7 @@ static int64_t sys_fstat(uint64_t fd, uint64_t stat_addr) {
 static int64_t sys_newfstatat(uint64_t dirfd, uint64_t path_addr, uint64_t stat_addr) {
     (void)dirfd;
     char path[128];
-    if (!copy_string_from_user(path_addr, path, sizeof(path))) {
+    if (!copy_resolved_path(path_addr, path, sizeof(path))) {
         return -(int64_t)EFAULT;
     }
     struct ramfs_node node;
@@ -569,11 +676,70 @@ static int64_t sys_getdents64(uint64_t fd, uint64_t buf, uint64_t len) {
 }
 
 static int64_t sys_getcwd(uint64_t buf, uint64_t len) {
-    static const char cwd[] = "/";
-    if (len < sizeof(cwd) || !user_writable(buf, sizeof(cwd))) {
+    const char *cwd = cell_current_cwd();
+    size_t need = kstrlen(cwd) + 1;
+    if (len < need || !user_writable(buf, need)) {
         return -(int64_t)EFAULT;
     }
-    return vmm_copy_to_user(active_as(), buf, cwd, sizeof(cwd)) ? (int64_t)buf : -(int64_t)EFAULT;
+    return vmm_copy_to_user(active_as(), buf, cwd, need) ? (int64_t)buf : -(int64_t)EFAULT;
+}
+
+static int64_t sys_chdir(uint64_t path_addr) {
+    char path[128];
+    if (!copy_resolved_path(path_addr, path, sizeof(path))) {
+        return -(int64_t)EFAULT;
+    }
+    struct ramfs_node node;
+    if (!ramfs_lookup_node(sys_ramfs, path, &node)) {
+        return -(int64_t)ENOENT;
+    }
+    if (!node.is_dir) {
+        return -(int64_t)ENOTDIR;
+    }
+    return cell_set_cwd(path) ? 0 : -(int64_t)ENAMETOOLONG;
+}
+
+static int64_t sys_mkdirat(uint64_t dirfd, uint64_t path_addr) {
+    if ((int64_t)dirfd != AT_FDCWD) {
+        return -(int64_t)EINVAL;
+    }
+    char path[128];
+    if (!copy_resolved_path(path_addr, path, sizeof(path))) {
+        return -(int64_t)EFAULT;
+    }
+    return ramfs_mkdir(sys_ramfs, path) ? 0 : -(int64_t)EINVAL;
+}
+
+static int64_t sys_unlinkat(uint64_t dirfd, uint64_t path_addr) {
+    if ((int64_t)dirfd != AT_FDCWD) {
+        return -(int64_t)EINVAL;
+    }
+    char path[128];
+    if (!copy_resolved_path(path_addr, path, sizeof(path))) {
+        return -(int64_t)EFAULT;
+    }
+    return ramfs_unlink(sys_ramfs, path) ? 0 : -(int64_t)ENOTEMPTY;
+}
+
+static int64_t sys_renameat(uint64_t old_dirfd, uint64_t old_path_addr, uint64_t new_dirfd, uint64_t new_path_addr) {
+    if ((int64_t)old_dirfd != AT_FDCWD || (int64_t)new_dirfd != AT_FDCWD) {
+        return -(int64_t)EINVAL;
+    }
+    char old_path[128];
+    char new_path[128];
+    if (!copy_resolved_path(old_path_addr, old_path, sizeof(old_path)) ||
+        !copy_resolved_path(new_path_addr, new_path, sizeof(new_path))) {
+        return -(int64_t)EFAULT;
+    }
+    return ramfs_rename(sys_ramfs, old_path, new_path) ? 0 : -(int64_t)ENOENT;
+}
+
+static int64_t sys_ftruncate(uint64_t fd, uint64_t size) {
+    struct ramfs_node node;
+    if (!cell_fd_stat((int)fd, &node)) {
+        return -(int64_t)EBADF;
+    }
+    return ramfs_truncate(node.fs, node.index, size) ? 0 : -(int64_t)EINVAL;
 }
 
 static int64_t sys_sched_getaffinity(uint64_t mask, uint64_t len) {
@@ -713,6 +879,22 @@ static int64_t dispatch(struct trap_frame *f) {
     case SYS_SET_TID_ADDRESS:
         return 1;
     case SYS_IOCTL:
+        return 0;
+    case SYS_MKDIRAT:
+        return sys_mkdirat(a0, a1);
+    case SYS_UNLINKAT:
+        return sys_unlinkat(a0, a1);
+    case SYS_RENAMEAT:
+        return sys_renameat(a0, a1, a2, a3);
+    case SYS_RENAMEAT2:
+        return a4 == 0 ? sys_renameat(a0, a1, a2, a3) : -(int64_t)EINVAL;
+    case SYS_FTRUNCATE:
+        return sys_ftruncate(a0, a1);
+    case SYS_CHDIR:
+        return sys_chdir(a0);
+    case SYS_FCHDIR:
+        return cell_fd_is_dir((int)a0) ? 0 : -(int64_t)ENOTDIR;
+    case SYS_FSYNC:
         return 0;
     case SYS_GETRANDOM:
         return sys_getrandom(a0, a1);

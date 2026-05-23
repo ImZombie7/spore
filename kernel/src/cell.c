@@ -14,6 +14,13 @@ static int next_domain_id = 1;
 static int next_thread_id = 1;
 static int next_snapshot_id;
 
+enum {
+    CELL_O_ACCMODE = 3,
+    CELL_O_WRONLY = 1,
+    CELL_O_RDWR = 2,
+    CELL_O_APPEND = 02000,
+};
+
 static void poweroff(void) {
     __asm__ volatile(
         "mov x0, #0x0008\n"
@@ -251,6 +258,24 @@ int cell_current_ppid(void) {
     return domain == NULL ? 0 : domain->parent_id;
 }
 
+const char *cell_current_cwd(void) {
+    struct domain *domain = current_domain();
+    return domain == NULL ? "/" : domain->cwd;
+}
+
+bool cell_set_cwd(const char *path) {
+    struct domain *domain = current_domain();
+    if (domain == NULL || path == NULL || path[0] != '/') {
+        return false;
+    }
+    size_t len = kstrlen(path);
+    if (len >= sizeof(domain->cwd)) {
+        return false;
+    }
+    kmemcpy(domain->cwd, path, len + 1);
+    return true;
+}
+
 void cell_save_current(const struct trap_frame *frame) {
     if (current_thread == NULL) {
         return;
@@ -485,7 +510,35 @@ int64_t cell_fd_write(int fd, uint64_t buf, uint64_t len) {
     }
     struct open_file *file = domain->fds[fd];
     if (file->type != OPEN_STDOUT) {
-        return -22;
+        if (file->type != OPEN_RAMFS ||
+            ((file->flags & CELL_O_ACCMODE) != CELL_O_WRONLY &&
+             (file->flags & CELL_O_ACCMODE) != CELL_O_RDWR)) {
+            return -22;
+        }
+        if ((file->flags & CELL_O_APPEND) != 0) {
+            struct ramfs_node fresh;
+            if (ramfs_refresh_node(file->node.fs, file->node.index, &fresh)) {
+                file->offset = fresh.size;
+            }
+        }
+        uint8_t tmp[128];
+        uint64_t done = 0;
+        while (done < len) {
+            uint64_t chunk = len - done;
+            if (chunk > sizeof(tmp)) {
+                chunk = sizeof(tmp);
+            }
+            if (!vmm_copy_from_user(&domain->as, tmp, buf + done, (size_t)chunk)) {
+                return -14;
+            }
+            int64_t wrote = ramfs_write(file->node.fs, file->node.index, file->offset, tmp, chunk);
+            if (wrote < 0) {
+                return -28;
+            }
+            file->offset += (uint64_t)wrote;
+            done += (uint64_t)wrote;
+        }
+        return (int64_t)done;
     }
     for (uint64_t i = 0; i < len; ++i) {
         char c;
@@ -543,16 +596,24 @@ int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len, struct trap_frame *fram
     if (file->type != OPEN_RAMFS || file->node.is_dir) {
         return -22;
     }
-    uint64_t remaining = file->node.size > file->offset ? file->node.size - file->offset : 0;
-    uint64_t n = remaining < len ? remaining : len;
-    if (!vmm_copy_to_user(&domain->as,
-                          buf,
-                          (const uint8_t *)file->node.data + file->offset,
-                          (size_t)n)) {
-        return -14;
+    uint8_t tmp[128];
+    uint64_t done = 0;
+    while (done < len) {
+        uint64_t chunk = len - done;
+        if (chunk > sizeof(tmp)) {
+            chunk = sizeof(tmp);
+        }
+        uint64_t got = ramfs_read(file->node.fs, file->node.index, file->offset, tmp, chunk);
+        if (got == 0) {
+            break;
+        }
+        if (!vmm_copy_to_user(&domain->as, buf + done, tmp, (size_t)got)) {
+            return -14;
+        }
+        file->offset += got;
+        done += got;
     }
-    file->offset += n;
-    return (int64_t)n;
+    return (int64_t)done;
 }
 
 void cell_wake_stdin(void) {
@@ -585,7 +646,8 @@ int64_t cell_fd_lseek(int fd, int64_t off, int whence) {
     } else if (whence == 1) {
         base = (int64_t)file->offset;
     } else if (whence == 2) {
-        base = (int64_t)file->node.size;
+        struct ramfs_node fresh;
+        base = ramfs_refresh_node(file->node.fs, file->node.index, &fresh) ? (int64_t)fresh.size : 0;
     } else {
         return -22;
     }
@@ -619,6 +681,9 @@ int cell_fd_open_node(const struct ramfs_node *node, uint32_t flags) {
     file->type = OPEN_RAMFS;
     file->flags = flags;
     file->node = *node;
+    if ((flags & CELL_O_APPEND) != 0) {
+        file->offset = node->size;
+    }
     domain->fds[fd] = file;
     return fd;
 }
@@ -659,8 +724,12 @@ bool cell_fd_stat(int fd, struct ramfs_node *out) {
         *out = (struct ramfs_node) {.ino = 10, .is_dir = false};
         return true;
     }
-    *out = file->node;
-    return true;
+    return ramfs_refresh_node(file->node.fs, file->node.index, out);
+}
+
+bool cell_fd_is_dir(int fd) {
+    struct ramfs_node node;
+    return cell_fd_stat(fd, &node) && node.is_dir;
 }
 
 bool cell_fd_next_dirent(int fd, struct ramfs_dirent *out) {
@@ -672,7 +741,7 @@ bool cell_fd_next_dirent(int fd, struct ramfs_dirent *out) {
     if (file->type != OPEN_RAMFS || !file->node.is_dir) {
         return false;
     }
-    if (!ramfs_root_dirent((size_t)file->offset, out)) {
+    if (!ramfs_dirent(file->node.fs, file->node.index, (size_t)file->offset, out)) {
         return false;
     }
     ++file->offset;

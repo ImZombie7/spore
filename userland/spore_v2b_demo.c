@@ -169,6 +169,67 @@ static int phase_c_stdin_demo(void) {
     return ok;
 }
 
+static int phase_d_fs_demo(void) {
+    int ok = 1;
+    if (mkdir("/tmp/d", 0777) != 0) {
+        ok = 0;
+    }
+    int fd = open("/tmp/d/a", O_CREAT | O_RDWR | O_TRUNC, 0666);
+    if (fd < 0) {
+        ok = 0;
+    } else {
+        const char msg[] = "phase-d";
+        if (write(fd, msg, sizeof(msg) - 1) != (ssize_t)(sizeof(msg) - 1)) {
+            ok = 0;
+        }
+        close(fd);
+    }
+    if (chdir("/tmp/d") != 0) {
+        ok = 0;
+    }
+    char cwd[64];
+    if (getcwd(cwd, sizeof(cwd)) == NULL || strcmp(cwd, "/tmp/d") != 0) {
+        ok = 0;
+    }
+    fd = open("a", O_RDONLY);
+    char buf[32] = {0};
+    if (fd < 0 || read(fd, buf, sizeof(buf) - 1) != 7 || strcmp(buf, "phase-d") != 0) {
+        ok = 0;
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (rename("a", "b") != 0) {
+        ok = 0;
+    }
+    int dfd = open(".", O_RDONLY);
+    char dents[256];
+    long dent_bytes = syscall(SYS_getdents64, dfd, dents, sizeof(dents));
+    int saw_b = 0;
+    for (long off = 0; off < dent_bytes;) {
+        struct linux_dirent64 *d = (struct linux_dirent64 *)(dents + off);
+        if (strcmp(d->d_name, "b") == 0) {
+            saw_b = 1;
+        }
+        off += d->d_reclen;
+    }
+    if (dfd >= 0) {
+        close(dfd);
+    }
+    if (!saw_b) {
+        ok = 0;
+    }
+    if (unlink("b") != 0) {
+        ok = 0;
+    }
+    if (chdir("/") != 0) {
+        ok = 0;
+    }
+    (void)syscall(35, AT_FDCWD, "/tmp/d", 0x200);
+    printf("[spore] v2d fs/cwd demo: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 int main(void) {
     size_t len = 8 * 1024 * 1024;
     unsigned char *mem = malloc(len);
@@ -232,6 +293,7 @@ int main(void) {
     printf("[spore] v2c fork/exec/wait demo: %s\n",
            phase_c_exec_demo() ? "PASS" : "FAIL");
     (void)phase_c_stdin_demo();
+    (void)phase_d_fs_demo();
     printf("[spore] cell 1: exit(0)\n");
     return 0;
 }
