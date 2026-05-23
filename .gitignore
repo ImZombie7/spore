@@ -2,6 +2,7 @@ build/
 
 /.cache
 /.nova
+/goal.md
 
 *.o
 *.iso

@@ -10,7 +10,7 @@ tradeoff is image size because each binary carries static musl; shrinking can be
 later dynamic-linking or multiplexer goal. The current filesystem has no symlinks,
 so a multiplexer would also need hardlink-style dispatch or shell support.
 
-## Current Binary Disposition
+## Final Binary Disposition
 
 Real tools, target `/bin`:
 
@@ -34,7 +34,7 @@ Confinement fixtures, target `/demos`:
 - `memhog`
 - `escalate`
 
-Integration-only checks, remove from image after migrating assertions:
+Integration-only checks, moved to the explicit `run-tests` image:
 
 - `spore_demo`
 - `exec_child`
@@ -43,6 +43,17 @@ Duplication to resolve:
 
 - Keep canonical `/bin/hello`.
 - Drop `/hello` and `/boot/hello` from the baked image.
+
+## Result
+
+- `/bin` contains only real tools and `spsh`.
+- Confinement fixtures are baked under `/demos`.
+- The interactive image is generated from `userland/image.manifest`.
+- The regression gauntlet is generated from `userland/tests/integration/image.manifest`
+  and runs with `meson compile -C build run-tests`.
+- The separate-static-binary layout grows the interactive ISO to about 110 MB and
+  the test ISO to about 71 MB. Shrinking is a later dynamic-linking or
+  multiplexer goal.
 
 ## Known Test Debt
 

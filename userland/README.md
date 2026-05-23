@@ -1,0 +1,47 @@
+# Spore Userland
+
+Spore userland is organized as one static musl binary per program. That keeps
+each tool independently confineable by the policy layer.
+
+## Layout
+
+- `lib/spore/`: tiny shared helper runtime used by tools.
+- `bin/<tool>/main.c`: real commands baked into `/bin`.
+- `demos/<name>/main.c`: confinement fixtures baked into `/demos`.
+- `tests/integration/`: regression binaries used only by `run-tests`.
+- `image.manifest`: declarative list of sources and baked paths for the
+  interactive image.
+
+## Add a Tool
+
+1. Create `userland/bin/<name>/main.c`.
+2. Include `util.h` when you want shared helpers such as `spore_eprintf`,
+   `spore_usage`, `spore_basename`, or `spore_streq`.
+3. Add a short `meson.build` note matching the neighboring tools.
+4. Add `userland/bin/<name> /bin/<name>` to `userland/image.manifest`.
+5. Run:
+
+```sh
+meson compile -C build
+meson compile -C build run-shell
+```
+
+Commands should return `0` on success, `1` for ordinary runtime failure, and
+`2` for usage errors. Keep diagnostics on stderr unless the command's normal
+contract is to print a result.
+
+## Add a Confinement Demo
+
+1. Create `userland/demos/<name>/main.c`.
+2. Add a `manifest` file describing the policy fixture.
+3. Add `userland/demos/<name> /demos/<name>` to `userland/image.manifest`.
+4. Update `tools/run_qemu_shell.py` if the demo is part of the policy gate.
+
+## Regression Image
+
+Interactive boot stays lean. The old boot-time gauntlet lives in
+`userland/tests/integration` and runs through:
+
+```sh
+meson compile -C build run-tests
+```
