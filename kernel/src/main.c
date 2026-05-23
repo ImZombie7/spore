@@ -1,4 +1,10 @@
 #include "kprintf.h"
+#include "arch/aarch64/exceptions.h"
+#include "elf/loader.h"
+#include "exec/stack.h"
+#include "mem.h"
+#include "mm/pmm.h"
+#include "mm/vmm.h"
 #include "pl011.h"
 
 #include <limine.h>
@@ -22,6 +28,18 @@ static volatile struct limine_hhdm_request hhdm_request = {
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_executable_address_request executable_address_request = {
     .id = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID,
+    .revision = 0,
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_memmap_request memmap_request = {
+    .id = LIMINE_MEMMAP_REQUEST_ID,
+    .revision = 0,
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_module_request module_request = {
+    .id = LIMINE_MODULE_REQUEST_ID,
     .revision = 0,
 };
 
@@ -124,13 +142,14 @@ static uint64_t current_el(void) {
 
 enum {
     PL011_PHYS = 0x09000000,
-    PAGE_SIZE = 0x1000,
+    EARLY_PAGE_SIZE = 0x1000,
     PT_ENTRIES = 512,
 };
 
-static uint64_t early_l1[PT_ENTRIES] __attribute__((aligned(PAGE_SIZE)));
-static uint64_t early_l2[PT_ENTRIES] __attribute__((aligned(PAGE_SIZE)));
-static uint64_t early_l3[PT_ENTRIES] __attribute__((aligned(PAGE_SIZE)));
+static uint64_t early_l1[PT_ENTRIES] __attribute__((aligned(EARLY_PAGE_SIZE)));
+static uint64_t early_l2[PT_ENTRIES] __attribute__((aligned(EARLY_PAGE_SIZE)));
+static uint64_t early_l3[PT_ENTRIES] __attribute__((aligned(EARLY_PAGE_SIZE)));
+static uint8_t kernel_stack[64 * 1024] __attribute__((aligned(16)));
 
 static uint64_t kernel_virt_to_phys(uintptr_t va) {
     const struct limine_executable_address_response *executable =
@@ -211,8 +230,37 @@ static void map_pl011_page(void) {
         : "memory");
 }
 
+static const struct limine_file *find_init_module(void) {
+    if (module_request.response == NULL) {
+        return NULL;
+    }
+    for (uint64_t i = 0; i < module_request.response->module_count; ++i) {
+        const struct limine_file *file = module_request.response->modules[i];
+        if (file->string != NULL && kmemcmp(file->string, "/init", 6) == 0) {
+            return file;
+        }
+        if (file->path != NULL) {
+            const char *path = file->path;
+            size_t len = kstrlen(path);
+            if (len >= 5 && kmemcmp(path + len - 5, "/init", 6) == 0) {
+                return file;
+            }
+        }
+    }
+    return NULL;
+}
+
+void finish_enter_el0(struct user_address_space *as, uint64_t entry, uint64_t user_sp) {
+    syscall_set_address_space(as);
+    vmm_enable_ttbr0();
+    vmm_install_user(as);
+    kprintf("[kernel] entering EL0\n");
+    enter_el0(entry, user_sp);
+}
+
 void kernel_main(void) {
     if (hhdm_request.response == NULL || executable_address_request.response == NULL ||
+        memmap_request.response == NULL ||
         !LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
         for (;;) {
             __asm__ volatile("wfe");
@@ -223,8 +271,33 @@ void kernel_main(void) {
     pl011_init(hhdm_request.response->offset);
 
     kprintf("[kernel] booted at EL%u\n", (unsigned)current_el());
-    kprintf("[kernel] hhdm offset %p\n", (void *)(uintptr_t)hhdm_request.response->offset);
-    kprintf("hello\n");
+
+    pmm_init(hhdm_request.response->offset, memmap_request.response);
+    exceptions_init();
+
+    const struct limine_file *init = find_init_module();
+    if (init == NULL) {
+        kprintf("[kernel] missing /init\n");
+        for (;;) {
+            __asm__ volatile("wfe");
+        }
+    }
+    kprintf("[kernel] loading /init\n");
+
+    struct user_address_space as;
+    struct loaded_elf elf;
+    uint64_t user_sp;
+    if (!vmm_user_init(&as, hhdm_request.response->offset) ||
+        !elf_load_static_aarch64(&as, init->address, init->size, &elf) ||
+        !build_initial_stack(&as, &elf, &user_sp)) {
+        kprintf("[kernel] failed to prepare /init\n");
+        for (;;) {
+            __asm__ volatile("wfe");
+        }
+    }
+
+    uint64_t kernel_sp = (uint64_t)(uintptr_t)(kernel_stack + sizeof(kernel_stack));
+    switch_stack_and_finish(kernel_sp, &as, elf.entry, user_sp);
 
     for (;;) {
         __asm__ volatile("wfe");

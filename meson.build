@@ -7,4 +7,4 @@ project('spore', 'c',
   ])
 
 subdir('kernel')
-
+subdir('tests')

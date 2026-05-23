@@ -18,9 +18,29 @@ kernel_c_args = [
 
 kernel_sources = files(
   'src/arch/aarch64/boot.S',
+  'src/arch/aarch64/exceptions.c',
+  'src/arch/aarch64/syscall.c',
+  'src/arch/aarch64/vectors.S',
   'src/main.c',
   'src/drivers/pl011.c',
+  'src/elf/loader.c',
+  'src/exec/stack.c',
+  'src/lib/mem.c',
+  'src/mm/pmm.c',
+  'src/mm/vmm.c',
 )
+
+init_bin = custom_target('init',
+  input: files('../userland/hello.c'),
+  output: 'init',
+  command: [
+    'zig', 'cc',
+    '-target', 'aarch64-linux-musl',
+    '-static',
+    '@INPUT@',
+    '-o', '@OUTPUT@',
+  ],
+  build_by_default: true)
 
 kernel_elf = executable('kernel.elf',
   kernel_sources,
@@ -42,7 +62,7 @@ make_limine = custom_target('limine-host-tool',
   build_by_default: true)
 
 image = custom_target('image.iso',
-  input: [kernel_elf, files('boot/limine.conf'), make_limine],
+  input: [kernel_elf, files('boot/limine.conf'), make_limine, init_bin],
   output: 'image.iso',
   command: [
     'sh', '-c',
@@ -53,6 +73,7 @@ image = custom_target('image.iso',
     'cp "$3" "$1/boot/limine/limine.conf"; ' +
     'cp "$3" "$1/EFI/BOOT/limine.conf"; ' +
     'cp "$4/BOOTAA64.EFI" "$1/EFI/BOOT/BOOTAA64.EFI"; ' +
+    'cp "$5" "$1/boot/init"; ' +
     'efi_img="$1/efi.img"; ' +
     'rm -f "$efi_img"; ' +
     'dd if=/dev/zero of="$efi_img" bs=1M count=64 >/dev/null 2>&1; ' +
@@ -62,16 +83,18 @@ image = custom_target('image.iso',
     'mcopy -i "$efi_img" "$3" ::/EFI/BOOT/limine.conf; ' +
     'mcopy -i "$efi_img" "$3" ::/boot/limine/limine.conf; ' +
     'mcopy -i "$efi_img" "$2" ::/boot/kernel.elf; ' +
+    'mcopy -i "$efi_img" "$5" ::/boot/init; ' +
     'xorriso -as mkisofs ' +
     '-R -r -J -hfsplus -apm-block-size 2048 ' +
     '--efi-boot efi.img -no-emul-boot -efi-boot-part --efi-boot-image ' +
-    '--protective-msdos-label "$1" -o "$5" >/dev/null 2>&1; ' +
-    'cp "$5" "$6"',
+    '--protective-msdos-label "$1" -o "$6" >/dev/null 2>&1; ' +
+    'cp "$6" "$7"',
     'sh',
     iso_root,
     kernel_elf,
     files('boot/limine.conf'),
     limine_dir,
+    init_bin,
     image_iso,
     '@OUTPUT@',
   ],

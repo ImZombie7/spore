@@ -6,4 +6,3 @@
 	path = third_party/limine-protocol
 	url = https://github.com/Limine-Bootloader/limine-protocol.git
 	branch = trunk
-
