@@ -34,8 +34,16 @@ kernel_sources = files(
   'src/ramfs.c',
 )
 
+userland_tools = 'ls cat echo mkdir rm touch pwd hello true false'
+userland_bins_dir = meson.current_build_dir() / 'userland_bins'
+libspore_include = '-I' + meson.project_source_root() / 'userland/lib/spore'
+libspore_util = meson.project_source_root() / 'userland/lib/spore/util.c'
+
 init_bin = custom_target('init',
-  input: files('../userland/spsh.c'),
+  input: [
+    files('../userland/bin/spsh/main.c'),
+    files('../userland/lib/spore/util.c'),
+  ],
   output: 'init',
   command: [
     'zig', 'cc',
@@ -43,6 +51,7 @@ init_bin = custom_target('init',
     '-static',
     '-std=c23',
     '-D_GNU_SOURCE',
+    libspore_include,
     '@INPUT@',
     '-o', '@OUTPUT@',
   ],
@@ -62,35 +71,37 @@ spore_demo_bin = custom_target('spore_demo',
   ],
   build_by_default: true)
 
-coreutils_bin = custom_target('coreutils',
-  input: files('../userland/coreutils.c'),
-  output: 'coreutils',
-  command: [
-    'zig', 'cc',
-    '-target', 'aarch64-linux-musl',
-    '-static',
-    '-std=c23',
-    '-D_GNU_SOURCE',
-    '@INPUT@',
-    '-o', '@OUTPUT@',
-  ],
-  build_by_default: true)
-
-echo_bin = custom_target('echo',
+real_tools_stamp = custom_target('real-userland-tools',
   input: [
+    files('../userland/bin/ls/main.c'),
+    files('../userland/bin/cat/main.c'),
     files('../userland/bin/echo/main.c'),
+    files('../userland/bin/mkdir/main.c'),
+    files('../userland/bin/rm/main.c'),
+    files('../userland/bin/touch/main.c'),
+    files('../userland/bin/pwd/main.c'),
+    files('../userland/bin/hello/main.c'),
+    files('../userland/bin/true/main.c'),
+    files('../userland/bin/false/main.c'),
     files('../userland/lib/spore/util.c'),
   ],
-  output: 'echo',
+  output: 'real-userland-tools.stamp',
   command: [
-    'zig', 'cc',
-    '-target', 'aarch64-linux-musl',
-    '-static',
-    '-std=c23',
-    '-D_GNU_SOURCE',
-    '-I' + meson.project_source_root() / 'userland/lib/spore',
-    '@INPUT@',
-    '-o', '@OUTPUT@',
+    'sh', '-c',
+    'set -eu; outdir="$1"; srcroot="$2"; stamp="$3"; tools="$4"; ' +
+    'rm -rf "$outdir"; mkdir -p "$outdir"; ' +
+    'for tool in $tools; do ' +
+    '  zig cc -target aarch64-linux-musl -static -std=c23 -D_GNU_SOURCE ' +
+    '    -I"$srcroot/userland/lib/spore" ' +
+    '    "$srcroot/userland/bin/$tool/main.c" "$srcroot/userland/lib/spore/util.c" ' +
+    '    -o "$outdir/$tool"; ' +
+    'done; ' +
+    'touch "$stamp"',
+    'sh',
+    userland_bins_dir,
+    meson.project_source_root(),
+    '@OUTPUT@',
+    userland_tools,
   ],
   build_by_default: true)
 
@@ -142,7 +153,7 @@ make_limine = custom_target('limine-host-tool',
   build_by_default: true)
 
 image = custom_target('image.iso',
-  input: [kernel_elf, files('boot/limine.conf'), make_limine, init_bin, exec_child_bin, spore_demo_bin, coreutils_bin, policy_tools_bin, echo_bin],
+  input: [kernel_elf, files('boot/limine.conf'), make_limine, init_bin, exec_child_bin, spore_demo_bin, real_tools_stamp, policy_tools_bin],
   output: 'image.iso',
   command: [
     'sh', '-c',
@@ -156,9 +167,8 @@ image = custom_target('image.iso',
     'cp "$5" "$1/boot/init"; ' +
     'cp "$6" "$1/boot/exec_child"; ' +
     'cp "$7" "$1/boot/bin/spore_demo"; ' +
-    'for name in ls cat mkdir rm touch pwd hello true false; do cp "$8" "$1/boot/bin/$name"; done; ' +
-    'cp "${10}" "$1/boot/bin/echo"; ' +
-    'cp "$8" "$1/boot/hello"; ' +
+    'for name in ' + userland_tools + '; do cp "${10}/$name" "$1/boot/bin/$name"; done; ' +
+    'cp "${10}/hello" "$1/boot/hello"; ' +
     'for name in spinner peeker writer memhog escalate; do cp "$9" "$1/boot/bin/$name"; done; ' +
     'efi_img="$1/efi.img"; ' +
     'rm -f "$efi_img"; ' +
@@ -172,9 +182,8 @@ image = custom_target('image.iso',
     'mcopy -i "$efi_img" "$5" ::/boot/init; ' +
     'mcopy -i "$efi_img" "$6" ::/boot/exec_child; ' +
     'mcopy -i "$efi_img" "$7" ::/boot/bin/spore_demo; ' +
-    'for name in ls cat mkdir rm touch pwd hello true false; do mcopy -i "$efi_img" "$8" ::/boot/bin/$name; done; ' +
-    'mcopy -i "$efi_img" "${10}" ::/boot/bin/echo; ' +
-    'mcopy -i "$efi_img" "$8" ::/boot/hello; ' +
+    'for name in ' + userland_tools + '; do mcopy -i "$efi_img" "${10}/$name" ::/boot/bin/$name; done; ' +
+    'mcopy -i "$efi_img" "${10}/hello" ::/boot/hello; ' +
     'for name in spinner peeker writer memhog escalate; do mcopy -i "$efi_img" "$9" ::/boot/bin/$name; done; ' +
     'xorriso -as mkisofs ' +
     '-R -r -J -hfsplus -apm-block-size 2048 ' +
@@ -189,9 +198,9 @@ image = custom_target('image.iso',
     init_bin,
     exec_child_bin,
     spore_demo_bin,
-    coreutils_bin,
+    real_tools_stamp,
     policy_tools_bin,
-    echo_bin,
+    userland_bins_dir,
     image_iso,
     '@OUTPUT@',
   ],

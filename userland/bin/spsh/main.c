@@ -5,6 +5,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "util.h"
+
 extern char **environ;
 
 #define SYS_SPORE_APPLY_POLICY 0x4005
@@ -96,7 +98,7 @@ static int run_external(char **argv, const char *redir) {
 }
 
 static int run_confined(const char *manifest, char **argv) {
-    if (strcmp(manifest, "bad-manifest") == 0) {
+    if (spore_streq(manifest, "bad-manifest")) {
         puts("spore: spawn rejected: requested caps exceed parent");
         return 1;
     }
@@ -118,7 +120,7 @@ static int run_confined(const char *manifest, char **argv) {
         execve(path, argv, environ);
         _exit(127);
     }
-    int cpu_demo = strcmp(manifest, "compute-only") == 0 && strcmp(argv[0], "spinner") == 0;
+    int cpu_demo = spore_streq(manifest, "compute-only") && spore_streq(argv[0], "spinner");
     if (cpu_demo) {
         printf("spore: '%s' confined: syscall-class=compute, cpu=200ms\n", argv[0]);
     }
@@ -154,7 +156,7 @@ static int run_one(char *cmdline) {
         return 0;
     }
 
-    if (strcmp(argv[0], "cd") == 0) {
+    if (spore_streq(argv[0], "cd")) {
         const char *path = argc > 1 ? argv[1] : "/";
         if (chdir(path) != 0) {
             perror("cd");
@@ -162,19 +164,19 @@ static int run_one(char *cmdline) {
         }
         return 0;
     }
-    if (strcmp(argv[0], "pwd") == 0) {
+    if (spore_streq(argv[0], "pwd")) {
         char cwd[128];
         puts(getcwd(cwd, sizeof(cwd)) == NULL ? "?" : cwd);
         return 0;
     }
-    if (strcmp(argv[0], "exit") == 0) {
+    if (spore_streq(argv[0], "exit")) {
         exit(argc > 1 ? atoi(argv[1]) : 0);
     }
-    if (strcmp(argv[0], "help") == 0) {
+    if (spore_streq(argv[0], "help")) {
         puts("builtins: cd pwd exit help");
         return 0;
     }
-    if ((strcmp(argv[0], "confine") == 0 || strcmp(argv[0], "runc") == 0) && argc >= 3) {
+    if ((spore_streq(argv[0], "confine") || spore_streq(argv[0], "runc")) && argc >= 3) {
         return run_confined(argv[1], &argv[2]);
     }
     return run_external(argv, redir);
