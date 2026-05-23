@@ -6,6 +6,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 
 #ifndef SYS_getdents64
@@ -120,6 +122,53 @@ static int phase_b_timer_budget_demo(void) {
     return ok_compute && ok_budget;
 }
 
+static int phase_c_exec_demo(void) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        return 0;
+    }
+    if (pid == 0) {
+        char *const argv[] = {"/bin/exec_child", "ok", NULL};
+        char *const envp[] = {NULL};
+        execve("/bin/exec_child", argv, envp);
+        exit_group(99);
+    }
+    int status = 0;
+    pid_t got = waitpid(pid, &status, 0);
+    int ok = got == pid && WIFEXITED(status) && WEXITSTATUS(status) == 42;
+    printf("[spore] execve demo: child exit 42: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static int phase_c_stdin_demo(void) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        return 0;
+    }
+    if (pid == 0) {
+        char c = 0;
+        printf("[spore] stdin demo: child blocking on read(0)\n");
+        ssize_t n = read(0, &c, 1);
+        if (n == 1 && c == 'z') {
+            printf("[spore] stdin demo: read 'z'\n");
+            exit_group(0);
+        }
+        exit_group(4);
+    }
+
+    volatile unsigned long spin = 0;
+    for (unsigned long i = 0; i < 70000000ul; ++i) {
+        spin += i;
+    }
+    (void)spin;
+    kill(pid, SIGKILL);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    printf("[spore] stdin demo: blocking read resume: %s\n", ok ? "PASS" : "SKIP");
+    return ok;
+}
+
 int main(void) {
     size_t len = 8 * 1024 * 1024;
     unsigned char *mem = malloc(len);
@@ -180,6 +229,9 @@ int main(void) {
            snapshot_regression() ? "PASS" : "FAIL");
     printf("[spore] v2b timer/budget demo: %s\n",
            phase_b_timer_budget_demo() ? "PASS" : "FAIL");
+    printf("[spore] v2c fork/exec/wait demo: %s\n",
+           phase_c_exec_demo() ? "PASS" : "FAIL");
+    (void)phase_c_stdin_demo();
     printf("[spore] cell 1: exit(0)\n");
     return 0;
 }

@@ -48,6 +48,20 @@ init_bin = custom_target('init',
   ],
   build_by_default: true)
 
+exec_child_bin = custom_target('exec_child',
+  input: files('../userland/exec_child.c'),
+  output: 'exec_child',
+  command: [
+    'zig', 'cc',
+    '-target', 'aarch64-linux-musl',
+    '-static',
+    '-std=c23',
+    '-D_GNU_SOURCE',
+    '@INPUT@',
+    '-o', '@OUTPUT@',
+  ],
+  build_by_default: true)
+
 kernel_elf = executable('kernel.elf',
   kernel_sources,
   include_directories: [
@@ -68,7 +82,7 @@ make_limine = custom_target('limine-host-tool',
   build_by_default: true)
 
 image = custom_target('image.iso',
-  input: [kernel_elf, files('boot/limine.conf'), make_limine, init_bin],
+  input: [kernel_elf, files('boot/limine.conf'), make_limine, init_bin, exec_child_bin],
   output: 'image.iso',
   command: [
     'sh', '-c',
@@ -80,6 +94,7 @@ image = custom_target('image.iso',
     'cp "$3" "$1/EFI/BOOT/limine.conf"; ' +
     'cp "$4/BOOTAA64.EFI" "$1/EFI/BOOT/BOOTAA64.EFI"; ' +
     'cp "$5" "$1/boot/init"; ' +
+    'cp "$6" "$1/boot/exec_child"; ' +
     'efi_img="$1/efi.img"; ' +
     'rm -f "$efi_img"; ' +
     'dd if=/dev/zero of="$efi_img" bs=1M count=64 >/dev/null 2>&1; ' +
@@ -90,17 +105,19 @@ image = custom_target('image.iso',
     'mcopy -i "$efi_img" "$3" ::/boot/limine/limine.conf; ' +
     'mcopy -i "$efi_img" "$2" ::/boot/kernel.elf; ' +
     'mcopy -i "$efi_img" "$5" ::/boot/init; ' +
+    'mcopy -i "$efi_img" "$6" ::/boot/exec_child; ' +
     'xorriso -as mkisofs ' +
     '-R -r -J -hfsplus -apm-block-size 2048 ' +
     '--efi-boot efi.img -no-emul-boot -efi-boot-part --efi-boot-image ' +
-    '--protective-msdos-label "$1" -o "$6" >/dev/null 2>&1; ' +
-    'cp "$6" "$7"',
+    '--protective-msdos-label "$1" -o "$7" >/dev/null 2>&1; ' +
+    'cp "$7" "$8"',
     'sh',
     iso_root,
     kernel_elf,
     files('boot/limine.conf'),
     limine_dir,
     init_bin,
+    exec_child_bin,
     image_iso,
     '@OUTPUT@',
   ],
@@ -139,6 +156,12 @@ run_target('run',
 
 run_target('run-raw',
   command: qemu_args,
+  depends: image)
+
+run_target('run-stdin',
+  command: [
+    files('../tools/run_qemu_input.py'),
+  ] + qemu_args,
   depends: image)
 
 run_target('run-tcg',

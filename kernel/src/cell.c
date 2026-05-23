@@ -60,6 +60,7 @@ static struct thread *alloc_thread(struct domain *domain) {
             kmemset(&threads[i], 0, sizeof(threads[i]));
             threads[i].tid = next_thread_id++;
             threads[i].domain = domain;
+            threads[i].wait_reason = WAIT_NONE;
             threads[i].wait_target = -1;
             return &threads[i];
         }
@@ -169,6 +170,7 @@ static void wake_parent_of(struct domain *child) {
     struct domain *parent_domain = find_domain(child->parent_id);
     struct thread *parent = parent_domain == NULL ? NULL : thread_for_domain(parent_domain);
     if (parent != NULL && parent->state == THREAD_BLOCKED &&
+        parent->wait_reason == WAIT_CHILD &&
         (parent->wait_target < 0 || parent->wait_target == child->id)) {
         int status = child->exit_status << 8;
         uint64_t status_addr = parent->tf.x[1];
@@ -182,6 +184,7 @@ static void wake_parent_of(struct domain *child) {
         }
         destroy_domain(child);
         parent->state = THREAD_RUNNABLE;
+        parent->wait_reason = WAIT_NONE;
         parent->wait_target = -1;
     }
 }
@@ -370,6 +373,7 @@ int cell_wait4(int pid, uint64_t status_addr, struct trap_frame *frame) {
         }
         cell_save_current(frame);
         current_thread->state = THREAD_BLOCKED;
+        current_thread->wait_reason = WAIT_CHILD;
         current_thread->wait_target = pid;
         cell_schedule(frame);
         return CELL_SWITCHED;
@@ -386,6 +390,7 @@ int cell_wait4(int pid, uint64_t status_addr, struct trap_frame *frame) {
     }
     destroy_domain(child);
     current_thread->wait_target = -1;
+    current_thread->wait_reason = WAIT_NONE;
     return child_id;
 }
 
@@ -402,6 +407,32 @@ int cell_kill(int pid, int signal) {
     }
     wake_parent_of(domain);
     return 0;
+}
+
+bool cell_exec_replace(struct user_address_space *as,
+                       struct vma_list *vmas,
+                       uint64_t entry,
+                       uint64_t sp,
+                       struct trap_frame *frame) {
+    struct domain *domain = current_domain();
+    if (domain == NULL || current_thread == NULL) {
+        return false;
+    }
+
+    struct user_address_space old_as = domain->as;
+    domain->as = *as;
+    domain->vmas = *vmas;
+    vmm_install_user(&domain->as);
+    vmm_destroy(&old_as);
+
+    kmemset(frame, 0, sizeof(*frame));
+    frame->elr_el1 = entry;
+    frame->sp_el0 = sp;
+    frame->spsr_el1 = 0x340;
+    current_thread->tf = *frame;
+    current_thread->tpidr_el0 = 0;
+    __asm__ volatile("msr tpidr_el0, %0" : : "r"(0ull));
+    return true;
 }
 
 int cell_set_budget(int domain_id, uint64_t ticks) {
@@ -466,14 +497,48 @@ int64_t cell_fd_write(int fd, uint64_t buf, uint64_t len) {
     return (int64_t)len;
 }
 
-int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len) {
+static int64_t read_stdin_to_user(struct domain *domain, uint64_t buf, uint64_t len) {
+    uint64_t n = 0;
+    while (n < len) {
+        char c;
+        if (!pl011_getc(&c)) {
+            break;
+        }
+        if (!vmm_copy_to_user(&domain->as, buf + n, &c, 1)) {
+            return -14;
+        }
+        ++n;
+        if (c == '\n' || c == '\r') {
+            break;
+        }
+    }
+    return (int64_t)n;
+}
+
+int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len, struct trap_frame *frame) {
     struct domain *domain = current_domain();
     if (domain == NULL || fd < 0 || fd >= MAX_FDS || domain->fds[fd] == NULL) {
         return -9;
     }
     struct open_file *file = domain->fds[fd];
     if (file->type == OPEN_STDIN) {
-        return 0;
+        if (len == 0) {
+            return 0;
+        }
+        int64_t n = read_stdin_to_user(domain, buf, len);
+        if (n != 0) {
+            return n;
+        }
+        if (frame == NULL) {
+            return 0;
+        }
+        cell_save_current(frame);
+        current_thread->state = THREAD_BLOCKED;
+        current_thread->wait_reason = WAIT_STDIN;
+        current_thread->stdin_buf = buf;
+        current_thread->stdin_len = len;
+        cell_schedule(frame);
+        return CELL_SWITCHED;
     }
     if (file->type != OPEN_RAMFS || file->node.is_dir) {
         return -22;
@@ -488,6 +553,24 @@ int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len) {
     }
     file->offset += n;
     return (int64_t)n;
+}
+
+void cell_wake_stdin(void) {
+    for (size_t i = 0; i < MAX_THREADS; ++i) {
+        struct thread *thread = &threads[i];
+        if (thread->state != THREAD_BLOCKED || thread->wait_reason != WAIT_STDIN) {
+            continue;
+        }
+        int64_t n = read_stdin_to_user(thread->domain, thread->stdin_buf, thread->stdin_len);
+        if (n <= 0) {
+            continue;
+        }
+        thread->tf.x[0] = (uint64_t)n;
+        thread->state = THREAD_RUNNABLE;
+        thread->wait_reason = WAIT_NONE;
+        thread->stdin_buf = 0;
+        thread->stdin_len = 0;
+    }
 }
 
 int64_t cell_fd_lseek(int fd, int64_t off, int whence) {

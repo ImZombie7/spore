@@ -2,14 +2,19 @@
 
 #include "cell.h"
 #include "kprintf.h"
+#include "pl011.h"
 
 enum {
     VIRTUAL_TIMER_INTID = 27,
+    PL011_INTID = 33,
     SPURIOUS_INTID = 1023,
     GICD_BASE = 0x08000000,
     GICR_BASE = 0x080a0000,
     GICR_SGI_BASE = 0x080b0000,
     GICD_CTLR = 0x0000,
+    GICD_IGROUPR = 0x0080,
+    GICD_ISENABLER = 0x0100,
+    GICD_IPRIORITYR = 0x0400,
     GICR_WAKER = 0x0014,
     GICR_IGROUPR0 = 0x0080,
     GICR_ISENABLER0 = 0x0100,
@@ -63,6 +68,19 @@ static void gic_redist_init(void) {
     mmio_write32(GICR_SGI_BASE + GICR_ISENABLER0, 1u << VIRTUAL_TIMER_INTID);
 }
 
+static void gic_enable_spi(uint32_t intid) {
+    uint32_t bit = 1u << (intid % 32u);
+    mmio_write32(GICD_BASE + GICD_IGROUPR + (intid / 32u) * 4u, bit);
+
+    uint64_t priority_reg = GICD_BASE + GICD_IPRIORITYR + (intid & ~3u);
+    uint32_t priority = mmio_read32(priority_reg);
+    priority &= ~(0xffu << ((intid & 3u) * 8u));
+    priority |= 0x80u << ((intid & 3u) * 8u);
+    mmio_write32(priority_reg, priority);
+
+    mmio_write32(GICD_BASE + GICD_ISENABLER + (intid / 32u) * 4u, bit);
+}
+
 static void gic_cpu_init(void) {
     uint64_t sre;
     __asm__ volatile("mrs %0, S3_0_C12_C12_5" : "=r"(sre)); // ICC_SRE_EL1
@@ -88,7 +106,9 @@ void timer_init(uint64_t hhdm_offset) {
     }
     gic_dist_init();
     gic_redist_init();
+    gic_enable_spi(PL011_INTID);
     gic_cpu_init();
+    pl011_enable_rx_irq();
     __asm__ volatile(
         "msr cntv_tval_el0, %0\n"
         "msr cntv_ctl_el0, %1\n"
@@ -128,6 +148,13 @@ void handle_irq(struct trap_frame *frame, uint64_t from_lower_el) {
             : "memory");
         irq_eoi(iar);
         cell_timer_tick(frame, from_lower_el != 0);
+        return;
+    }
+    if (intid == PL011_INTID) {
+        if (pl011_handle_irq()) {
+            cell_wake_stdin();
+        }
+        irq_eoi(iar);
         return;
     }
     if (intid != SPURIOUS_INTID) {

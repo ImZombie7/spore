@@ -42,7 +42,7 @@ bool ramfs_lookup(const struct ramfs *fs, const char *path, struct ramfs_file *o
         if (!path_matches(file, path)) {
             continue;
         }
-        out->path = path;
+        out->path = file->string != NULL ? file->string : file->path;
         out->data = file->address;
         out->size = file->size;
         return true;
@@ -92,9 +92,15 @@ bool ramfs_lookup_node(const struct ramfs *fs, const char *path, struct ramfs_no
 
     struct ramfs_file file;
     if (ramfs_lookup(fs, path, &file)) {
+        const char *name = file.path;
+        for (const char *p = file.path; *p != '\0'; ++p) {
+            if (*p == '/' && p[1] != '\0') {
+                name = p + 1;
+            }
+        }
         *out = (struct ramfs_node) {
-            .path = "/init",
-            .name = "init",
+            .path = file.path,
+            .name = name,
             .data = file.data,
             .size = file.size,
             .ino = 5,

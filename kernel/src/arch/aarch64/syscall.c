@@ -2,6 +2,8 @@
 
 #include "arch/aarch64/regs.h"
 #include "cell.h"
+#include "elf/loader.h"
+#include "exec/stack.h"
 #include "kprintf.h"
 #include "mem.h"
 #include "mm/pmm.h"
@@ -56,6 +58,7 @@ enum {
     SYS_MUNMAP = 215,
     SYS_MREMAP = 216,
     SYS_CLONE = 220,
+    SYS_EXECVE = 221,
     SYS_MMAP = 222,
     SYS_MPROTECT = 226,
     SYS_MADVISE = 233,
@@ -94,6 +97,9 @@ enum {
     EINVAL = 22,
     ENOSYS = 38,
     MAX_IOVCNT = 1024,
+    MAX_EXEC_ARGS = 8,
+    MAX_EXEC_ENVS = 8,
+    MAX_EXEC_STRING = 128,
 };
 
 #define SYSCALL_SWITCHED ((int64_t)CELL_SWITCHED)
@@ -208,6 +214,34 @@ static bool copy_string_from_user(uint64_t user, char *dst, size_t cap) {
     return false;
 }
 
+static bool copy_string_array_from_user(uint64_t user,
+                                        char store[][MAX_EXEC_STRING],
+                                        const char *ptrs[],
+                                        uint64_t max_count,
+                                        uint64_t *out_count) {
+    *out_count = 0;
+    if (user == 0) {
+        return true;
+    }
+    for (uint64_t i = 0; i < max_count; ++i) {
+        uint64_t ptr;
+        if (!user_readable(user + i * sizeof(uint64_t), sizeof(ptr)) ||
+            !vmm_copy_from_user(active_as(), &ptr, user + i * sizeof(uint64_t), sizeof(ptr))) {
+            return false;
+        }
+        if (ptr == 0) {
+            *out_count = i;
+            return true;
+        }
+        if (!copy_string_from_user(ptr, store[i], MAX_EXEC_STRING)) {
+            return false;
+        }
+        ptrs[i] = store[i];
+    }
+    *out_count = max_count;
+    return true;
+}
+
 static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
     if (!user_readable(buf, len)) {
         return -(int64_t)EFAULT;
@@ -215,11 +249,11 @@ static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
     return cell_fd_write((int)fd, buf, len);
 }
 
-static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len) {
+static int64_t sys_read(struct trap_frame *frame, uint64_t fd, uint64_t buf, uint64_t len) {
     if (!user_writable(buf, len)) {
         return -(int64_t)EFAULT;
     }
-    return cell_fd_read((int)fd, buf, len);
+    return cell_fd_read((int)fd, buf, len, frame);
 }
 
 static int64_t sys_writev(uint64_t fd, uint64_t iov, uint64_t iovcnt) {
@@ -263,7 +297,7 @@ static int64_t sys_readv(uint64_t fd, uint64_t iov, uint64_t iovcnt) {
         if (!vmm_copy_from_user(active_as(), &v, iov + i * sizeof(v), sizeof(v))) {
             return -(int64_t)EFAULT;
         }
-        int64_t got = sys_read(fd, v.base, v.len);
+        int64_t got = sys_read(NULL, fd, v.base, v.len);
         if (got < 0) {
             return total == 0 ? got : total;
         }
@@ -389,6 +423,55 @@ static int64_t sys_clone(struct trap_frame *f, uint64_t flags, uint64_t newsp) {
         return -(int64_t)ENOSYS;
     }
     return cell_fork_current(f);
+}
+
+static int64_t sys_execve(struct trap_frame *frame, uint64_t path_addr, uint64_t argv_addr, uint64_t envp_addr) {
+    char path[128];
+    if (!copy_string_from_user(path_addr, path, sizeof(path))) {
+        return -(int64_t)EFAULT;
+    }
+
+    char argv_store[MAX_EXEC_ARGS][MAX_EXEC_STRING];
+    char env_store[MAX_EXEC_ENVS][MAX_EXEC_STRING];
+    const char *argv[MAX_EXEC_ARGS];
+    const char *envp[MAX_EXEC_ENVS];
+    uint64_t argc = 0;
+    uint64_t envc = 0;
+    if (!copy_string_array_from_user(argv_addr, argv_store, argv, MAX_EXEC_ARGS, &argc) ||
+        !copy_string_array_from_user(envp_addr, env_store, envp, MAX_EXEC_ENVS, &envc)) {
+        return -(int64_t)EFAULT;
+    }
+    if (argc == 0) {
+        argv_store[0][0] = '\0';
+        for (size_t i = 0; i + 1 < sizeof(argv_store[0]) && path[i] != '\0'; ++i) {
+            argv_store[0][i] = path[i];
+            argv_store[0][i + 1] = '\0';
+        }
+        argv[0] = argv_store[0];
+        argc = 1;
+    }
+
+    struct ramfs_file file;
+    if (!ramfs_lookup(sys_ramfs, path, &file)) {
+        return -(int64_t)ENOENT;
+    }
+
+    struct user_address_space new_as;
+    struct loaded_elf elf;
+    struct vma_list new_vmas;
+    uint64_t user_sp = 0;
+    uint64_t hhdm_offset = active_as()->hhdm_offset;
+    vma_list_init(&new_vmas);
+    if (!vmm_user_init(&new_as, hhdm_offset)) {
+        return -12;
+    }
+    if (!elf_load_static_aarch64(&new_as, file.data, (size_t)file.size, &elf) ||
+        !build_initial_stack_args(&new_as, &elf, argv, argc, envp, envc, &user_sp)) {
+        vmm_destroy(&new_as);
+        return -(int64_t)EINVAL;
+    }
+    kprintf("[spore] execve %s\n", path);
+    return cell_exec_replace(&new_as, &new_vmas, elf.entry, user_sp, frame) ? 0 : -12;
 }
 
 static int64_t sys_openat(uint64_t dirfd, uint64_t path_addr, uint64_t flags) {
@@ -526,7 +609,7 @@ static int64_t dispatch(struct trap_frame *f) {
         cell_schedule(f);
         return SYSCALL_SWITCHED;
     case SYS_READ:
-        return sys_read(a0, a1, a2);
+        return sys_read(f, a0, a1, a2);
     case SYS_WRITE:
         return sys_write(a0, a1, a2);
     case SYS_READV:
@@ -551,6 +634,8 @@ static int64_t dispatch(struct trap_frame *f) {
         return 0;
     case SYS_CLONE:
         return sys_clone(f, a0, a1);
+    case SYS_EXECVE:
+        return sys_execve(f, a0, a1, a2);
     case SYS_CLONE3:
         return -(int64_t)ENOSYS;
     case SYS_WAIT4: {

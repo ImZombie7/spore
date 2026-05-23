@@ -27,6 +27,12 @@ enum thread_state {
     THREAD_ZOMBIE,
 };
 
+enum wait_reason {
+    WAIT_NONE,
+    WAIT_CHILD,
+    WAIT_STDIN,
+};
+
 enum cell_state {
     CELL_UNUSED = THREAD_UNUSED,
     CELL_RUNNABLE = THREAD_RUNNABLE,
@@ -83,7 +89,10 @@ struct thread {
     enum thread_state state;
     struct trap_frame tf;
     uint64_t tpidr_el0;
+    enum wait_reason wait_reason;
     int wait_target;
+    uint64_t stdin_buf;
+    uint64_t stdin_len;
 };
 
 struct snapshot {
@@ -106,8 +115,13 @@ void cell_exit_current(int status, struct trap_frame *frame);
 int cell_fork_current(struct trap_frame *frame);
 int cell_wait4(int pid, uint64_t status_addr, struct trap_frame *frame);
 int cell_kill(int pid, int signal);
+bool cell_exec_replace(struct user_address_space *as,
+                       struct vma_list *vmas,
+                       uint64_t entry,
+                       uint64_t sp,
+                       struct trap_frame *frame);
 int64_t cell_fd_write(int fd, uint64_t buf, uint64_t len);
-int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len);
+int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len, struct trap_frame *frame);
 int64_t cell_fd_lseek(int fd, int64_t off, int whence);
 int cell_fd_open_node(const struct ramfs_node *node, uint32_t flags);
 int cell_fd_dup(int oldfd, int minfd);
@@ -125,6 +139,7 @@ bool cell_protect_vma(uint64_t start, uint64_t end, uint32_t prot);
 size_t cell_resident_pages(uint64_t start, uint64_t end);
 int cell_set_budget(int domain_id, uint64_t ticks);
 void cell_timer_tick(struct trap_frame *frame, bool from_lower_el);
+void cell_wake_stdin(void);
 int snapshot_create_current(void);
 int snapshot_spawn(int snap_id, uint64_t entry, uint64_t arg, struct trap_frame *frame);
 int snapshot_reap(int pid, uint64_t status_addr, struct trap_frame *frame);

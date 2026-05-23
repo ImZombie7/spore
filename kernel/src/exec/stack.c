@@ -34,19 +34,47 @@ static bool write_u64(const struct user_address_space *as, uint64_t va, uint64_t
 bool build_initial_stack(struct user_address_space *as,
                          const struct loaded_elf *elf,
                          uint64_t *stack_pointer) {
+    const char *argv[] = {"/init"};
+    return build_initial_stack_args(as, elf, argv, 1, NULL, 0, stack_pointer);
+}
+
+bool build_initial_stack_args(struct user_address_space *as,
+                              const struct loaded_elf *elf,
+                              const char *const argv[],
+                              uint64_t argc,
+                              const char *const envp[],
+                              uint64_t envc,
+                              uint64_t *stack_pointer) {
     for (uint64_t va = STACK_TOP - STACK_SIZE; va < STACK_TOP; va += PAGE_SIZE) {
         if (!vmm_alloc_page(as, va, VMM_USER_READ | VMM_USER_WRITE)) {
             return false;
         }
     }
 
-    const char argv0[] = "/init";
     uint64_t cursor = STACK_TOP;
+    uint64_t argv_va[16];
+    uint64_t envp_va[16];
 
-    cursor -= sizeof(argv0);
-    uint64_t argv0_va = cursor;
-    if (!vmm_copy_to_user(as, argv0_va, argv0, sizeof(argv0))) {
+    if (argc > 16 || envc > 16) {
         return false;
+    }
+
+    for (uint64_t i = 0; i < argc; ++i) {
+        size_t len = kstrlen(argv[i]) + 1;
+        cursor -= len;
+        argv_va[i] = cursor;
+        if (!vmm_copy_to_user(as, argv_va[i], argv[i], len)) {
+            return false;
+        }
+    }
+
+    for (uint64_t i = 0; i < envc; ++i) {
+        size_t len = kstrlen(envp[i]) + 1;
+        cursor -= len;
+        envp_va[i] = cursor;
+        if (!vmm_copy_to_user(as, envp_va[i], envp[i], len)) {
+            return false;
+        }
     }
 
     cursor = align_down(cursor - 16, 16);
@@ -76,18 +104,30 @@ bool build_initial_stack(struct user_address_space *as,
         {AT_NULL, 0},
     };
 
-    const uint64_t slots = 1 + 2 + 1 + (sizeof(aux) / sizeof(aux[0])) * 2;
+    const uint64_t slots = 1 + argc + 1 + envc + 1 + (sizeof(aux) / sizeof(aux[0])) * 2;
     uint64_t sp = align_down(cursor - slots * sizeof(uint64_t), 16);
     uint64_t p = sp;
 
-    if (!write_u64(as, p, 1)) {
+    if (!write_u64(as, p, argc)) {
         return false;
     }
     p += 8;
-    if (!write_u64(as, p, argv0_va) || !write_u64(as, p + 8, 0)) {
+    for (uint64_t i = 0; i < argc; ++i) {
+        if (!write_u64(as, p, argv_va[i])) {
+            return false;
+        }
+        p += 8;
+    }
+    if (!write_u64(as, p, 0)) {
         return false;
     }
-    p += 16;
+    p += 8;
+    for (uint64_t i = 0; i < envc; ++i) {
+        if (!write_u64(as, p, envp_va[i])) {
+            return false;
+        }
+        p += 8;
+    }
     if (!write_u64(as, p, 0)) {
         return false;
     }
