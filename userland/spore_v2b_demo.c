@@ -171,10 +171,10 @@ static int phase_c_stdin_demo(void) {
 
 static int phase_d_fs_demo(void) {
     int ok = 1;
-    if (mkdir("/tmp/d", 0777) != 0) {
+    if (mkdir("/tmp/spore-demo-d", 0777) != 0) {
         ok = 0;
     }
-    int fd = open("/tmp/d/a", O_CREAT | O_RDWR | O_TRUNC, 0666);
+    int fd = open("/tmp/spore-demo-d/a", O_CREAT | O_RDWR | O_TRUNC, 0666);
     if (fd < 0) {
         ok = 0;
     } else {
@@ -184,11 +184,11 @@ static int phase_d_fs_demo(void) {
         }
         close(fd);
     }
-    if (chdir("/tmp/d") != 0) {
+    if (chdir("/tmp/spore-demo-d") != 0) {
         ok = 0;
     }
     char cwd[64];
-    if (getcwd(cwd, sizeof(cwd)) == NULL || strcmp(cwd, "/tmp/d") != 0) {
+    if (getcwd(cwd, sizeof(cwd)) == NULL || strcmp(cwd, "/tmp/spore-demo-d") != 0) {
         ok = 0;
     }
     fd = open("a", O_RDONLY);
@@ -225,7 +225,7 @@ static int phase_d_fs_demo(void) {
     if (chdir("/") != 0) {
         ok = 0;
     }
-    (void)syscall(35, AT_FDCWD, "/tmp/d", 0x200);
+    (void)syscall(35, AT_FDCWD, "/tmp/spore-demo-d", 0x200);
     printf("[spore] v2d fs/cwd demo: %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }

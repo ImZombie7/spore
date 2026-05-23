@@ -136,6 +136,13 @@ static void copy_fd_table(struct domain *dst, const struct domain *src) {
     }
 }
 
+static void copy_domain_metadata(struct domain *dst, const struct domain *src) {
+    kmemcpy(dst->cwd, src->cwd, sizeof(dst->cwd));
+    kmemcpy(dst->fs_root, src->fs_root, sizeof(dst->fs_root));
+    dst->caps = src->caps;
+    dst->budget = src->budget;
+}
+
 static struct snapshot *find_snapshot(int id) {
     for (size_t i = 0; i < MAX_SNAPSHOTS; ++i) {
         if (snapshots[i].used && snapshots[i].id == id) {
@@ -304,8 +311,18 @@ void cell_restore_current(struct trap_frame *frame) {
 void cell_schedule(struct trap_frame *frame) {
     struct domain *old_domain = current_domain();
     cell_save_current(frame);
-    if (current_thread != NULL && current_thread->state == THREAD_RUNNABLE) {
-        size_t start = (size_t)(current_thread - threads + 1);
+    size_t start = current_thread == NULL ? 0 : (size_t)(current_thread - threads + 1);
+    for (;;) {
+        if (current_thread != NULL && current_thread->state == THREAD_RUNNABLE) {
+            for (size_t n = 0; n < MAX_THREADS; ++n) {
+                struct thread *candidate = &threads[(start + n) % MAX_THREADS];
+                if (candidate->state == THREAD_RUNNABLE) {
+                    current_thread = candidate;
+                    restore_thread(candidate, frame, old_domain);
+                    return;
+                }
+            }
+        }
         for (size_t n = 0; n < MAX_THREADS; ++n) {
             struct thread *candidate = &threads[(start + n) % MAX_THREADS];
             if (candidate->state == THREAD_RUNNABLE) {
@@ -314,13 +331,24 @@ void cell_schedule(struct trap_frame *frame) {
                 return;
             }
         }
-    }
-    for (size_t i = 0; i < MAX_THREADS; ++i) {
-        if (threads[i].state == THREAD_RUNNABLE) {
-            current_thread = &threads[i];
-            restore_thread(current_thread, frame, old_domain);
-            return;
+
+        bool has_blocked = false;
+        for (size_t i = 0; i < MAX_THREADS; ++i) {
+            if (threads[i].state == THREAD_BLOCKED) {
+                has_blocked = true;
+                break;
+            }
         }
+        if (!has_blocked) {
+            break;
+        }
+        __asm__ volatile(
+            "msr daifclr, #2\n"
+            "wfi\n"
+            "msr daifset, #2\n"
+            :
+            :
+            : "memory");
     }
     kprintf("[kernel] no runnable threads\n");
     poweroff();
@@ -359,6 +387,7 @@ int cell_fork_current(struct trap_frame *frame) {
         return -12;
     }
     (void)vma_clone(&child_domain->vmas, &parent->vmas);
+    copy_domain_metadata(child_domain, parent);
     copy_fd_table(child_domain, parent);
     child_domain->parent_id = parent->id;
     child_thread->state = THREAD_RUNNABLE;
@@ -883,6 +912,7 @@ int snapshot_spawn(int snap_id, uint64_t entry, uint64_t arg, struct trap_frame 
         return -12;
     }
     (void)vma_clone(&child_domain->vmas, &snap->vmas);
+    copy_domain_metadata(child_domain, parent);
     copy_fd_table(child_domain, parent);
     child_domain->parent_id = parent->id;
     child_thread->state = THREAD_RUNNABLE;

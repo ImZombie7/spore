@@ -158,6 +158,7 @@ static uint64_t early_l2[PT_ENTRIES] __attribute__((aligned(EARLY_PAGE_SIZE)));
 static uint64_t early_l3[EARLY_L3_TABLES][PT_ENTRIES] __attribute__((aligned(EARLY_PAGE_SIZE)));
 static size_t early_l3_used;
 static uint8_t kernel_stack[64 * 1024] __attribute__((aligned(16)));
+static struct ramfs boot_ramfs;
 
 static uint64_t kernel_virt_to_phys(uintptr_t va) {
     const struct limine_executable_address_response *executable =
@@ -301,11 +302,10 @@ void kernel_main(void) {
     timer_init(hhdm_request.response->offset);
     cell_system_init(hhdm_request.response->offset);
 
-    struct ramfs fs;
     struct ramfs_file init;
-    ramfs_init(&fs, module_request.response);
-    syscall_set_ramfs(&fs);
-    if (!ramfs_lookup(&fs, "/init", &init)) {
+    ramfs_init(&boot_ramfs, module_request.response);
+    syscall_set_ramfs(&boot_ramfs);
+    if (!ramfs_lookup(&boot_ramfs, "/init", &init)) {
         kprintf("[kernel] missing /init\n");
         for (;;) {
             __asm__ volatile("wfe");

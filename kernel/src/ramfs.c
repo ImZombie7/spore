@@ -152,15 +152,7 @@ static bool path_matches(const struct limine_file *file, const char *path) {
     if (file->string != NULL && streq(file->string, path)) {
         return true;
     }
-    if (file->path == NULL) {
-        return false;
-    }
-
-    const char *module_path = file->path;
-    size_t module_len = kstrlen(module_path);
-    size_t target_len = kstrlen(path);
-    return module_len >= target_len &&
-           streq(module_path + module_len - target_len, path);
+    return false;
 }
 
 void ramfs_init(struct ramfs *fs, const struct limine_module_response *modules) {

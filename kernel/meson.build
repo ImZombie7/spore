@@ -35,8 +35,36 @@ kernel_sources = files(
 )
 
 init_bin = custom_target('init',
-  input: files('../userland/spore_v2b_demo.c'),
+  input: files('../userland/spsh.c'),
   output: 'init',
+  command: [
+    'zig', 'cc',
+    '-target', 'aarch64-linux-musl',
+    '-static',
+    '-std=c23',
+    '-D_GNU_SOURCE',
+    '@INPUT@',
+    '-o', '@OUTPUT@',
+  ],
+  build_by_default: true)
+
+spore_demo_bin = custom_target('spore_demo',
+  input: files('../userland/spore_v2b_demo.c'),
+  output: 'spore_demo',
+  command: [
+    'zig', 'cc',
+    '-target', 'aarch64-linux-musl',
+    '-static',
+    '-std=c23',
+    '-D_GNU_SOURCE',
+    '@INPUT@',
+    '-o', '@OUTPUT@',
+  ],
+  build_by_default: true)
+
+coreutils_bin = custom_target('coreutils',
+  input: files('../userland/coreutils.c'),
+  output: 'coreutils',
   command: [
     'zig', 'cc',
     '-target', 'aarch64-linux-musl',
@@ -82,35 +110,41 @@ make_limine = custom_target('limine-host-tool',
   build_by_default: true)
 
 image = custom_target('image.iso',
-  input: [kernel_elf, files('boot/limine.conf'), make_limine, init_bin, exec_child_bin],
+  input: [kernel_elf, files('boot/limine.conf'), make_limine, init_bin, exec_child_bin, spore_demo_bin, coreutils_bin],
   output: 'image.iso',
   command: [
     'sh', '-c',
     'set -eu; ' +
     'rm -rf "$1"; ' +
-    'mkdir -p "$1/boot/limine" "$1/EFI/BOOT"; ' +
+    'mkdir -p "$1/boot/limine" "$1/EFI/BOOT" "$1/boot/bin"; ' +
     'cp "$2" "$1/boot/kernel.elf"; ' +
     'cp "$3" "$1/boot/limine/limine.conf"; ' +
     'cp "$3" "$1/EFI/BOOT/limine.conf"; ' +
     'cp "$4/BOOTAA64.EFI" "$1/EFI/BOOT/BOOTAA64.EFI"; ' +
     'cp "$5" "$1/boot/init"; ' +
     'cp "$6" "$1/boot/exec_child"; ' +
+    'cp "$7" "$1/boot/bin/spore_demo"; ' +
+    'for name in ls cat echo mkdir rm touch pwd hello true false; do cp "$8" "$1/boot/bin/$name"; done; ' +
+    'cp "$8" "$1/boot/hello"; ' +
     'efi_img="$1/efi.img"; ' +
     'rm -f "$efi_img"; ' +
     'dd if=/dev/zero of="$efi_img" bs=1M count=64 >/dev/null 2>&1; ' +
     'mkfs.fat -F 32 "$efi_img" >/dev/null; ' +
-    'mmd -i "$efi_img" ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine; ' +
+    'mmd -i "$efi_img" ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine ::/boot/bin; ' +
     'mcopy -i "$efi_img" "$4/BOOTAA64.EFI" ::/EFI/BOOT/BOOTAA64.EFI; ' +
     'mcopy -i "$efi_img" "$3" ::/EFI/BOOT/limine.conf; ' +
     'mcopy -i "$efi_img" "$3" ::/boot/limine/limine.conf; ' +
     'mcopy -i "$efi_img" "$2" ::/boot/kernel.elf; ' +
     'mcopy -i "$efi_img" "$5" ::/boot/init; ' +
     'mcopy -i "$efi_img" "$6" ::/boot/exec_child; ' +
+    'mcopy -i "$efi_img" "$7" ::/boot/bin/spore_demo; ' +
+    'for name in ls cat echo mkdir rm touch pwd hello true false; do mcopy -i "$efi_img" "$8" ::/boot/bin/$name; done; ' +
+    'mcopy -i "$efi_img" "$8" ::/boot/hello; ' +
     'xorriso -as mkisofs ' +
     '-R -r -J -hfsplus -apm-block-size 2048 ' +
     '--efi-boot efi.img -no-emul-boot -efi-boot-part --efi-boot-image ' +
-    '--protective-msdos-label "$1" -o "$7" >/dev/null 2>&1; ' +
-    'cp "$7" "$8"',
+    '--protective-msdos-label "$1" -o "$9" >/dev/null 2>&1; ' +
+    'cp "$9" "${10}"',
     'sh',
     iso_root,
     kernel_elf,
@@ -118,6 +152,8 @@ image = custom_target('image.iso',
     limine_dir,
     init_bin,
     exec_child_bin,
+    spore_demo_bin,
+    coreutils_bin,
     image_iso,
     '@OUTPUT@',
   ],
@@ -161,6 +197,12 @@ run_target('run-raw',
 run_target('run-stdin',
   command: [
     files('../tools/run_qemu_input.py'),
+  ] + qemu_args,
+  depends: image)
+
+run_target('run-shell',
+  command: [
+    files('../tools/run_qemu_shell.py'),
   ] + qemu_args,
   depends: image)
 
