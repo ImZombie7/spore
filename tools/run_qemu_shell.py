@@ -15,6 +15,12 @@ COMMANDS = [
     b"mkdir /tmp/d && cd /tmp/d && touch x && ls\n",
     b"/hello\n",
     b"/bin/spore_demo\n",
+    b"confine compute-only spinner\n",
+    b"confine compute-only peeker /etc/motd\n",
+    b"confine fs:/tmp peeker /etc/motd\n",
+    b"confine fs:/tmp writer /tmp/d/out\n",
+    b"confine mem:1 memhog\n",
+    b"runc bad-manifest escalate\n",
     b"exit\n",
 ]
 
@@ -35,7 +41,7 @@ def main() -> int:
     out = bytearray()
     sent = 0
     last_prompt_at = -1
-    deadline = time.monotonic() + 45
+    deadline = time.monotonic() + 75
     while proc.poll() is None:
         if time.monotonic() > deadline:
             proc.terminate()

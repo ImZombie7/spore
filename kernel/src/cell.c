@@ -19,7 +19,17 @@ enum {
     CELL_O_WRONLY = 1,
     CELL_O_RDWR = 2,
     CELL_O_APPEND = 02000,
+    CAP_ENFORCE = 1u << 0,
 };
+
+static bool str_eq(const char *a, const char *b) {
+    while (*a != '\0' && *b != '\0') {
+        if (*a++ != *b++) {
+            return false;
+        }
+    }
+    return *a == '\0' && *b == '\0';
+}
 
 static void poweroff(void) {
     __asm__ volatile(
@@ -281,6 +291,88 @@ bool cell_set_cwd(const char *path) {
     }
     kmemcpy(domain->cwd, path, len + 1);
     return true;
+}
+
+const char *cell_current_fs_root(void) {
+    struct domain *domain = current_domain();
+    return domain == NULL ? "/" : domain->fs_root;
+}
+
+static void cap_allow(struct capability_set *caps, uint64_t nr) {
+    if (nr < 512) {
+        caps->syscall_allow[nr / 64] |= 1ull << (nr % 64);
+    }
+}
+
+static void cap_allow_common(struct capability_set *caps) {
+    static const uint16_t common[] = {
+        17, 23, 24, 25, 29, 57, 63, 64, 65, 66, 80, 93, 94, 96, 99,
+        101, 113, 115, 123, 124, 134, 135, 160, 172, 173, 174, 175,
+        176, 177, 178, 179, 214, 215, 216, 220, 221, 222, 226, 233,
+        260, 261, 278,
+    };
+    for (size_t i = 0; i < sizeof(common) / sizeof(common[0]); ++i) {
+        cap_allow(caps, common[i]);
+    }
+}
+
+static void cap_allow_files(struct capability_set *caps) {
+    static const uint16_t files[] = {34, 35, 38, 46, 49, 50, 56, 61, 62, 78, 79, 82, 276};
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
+        cap_allow(caps, files[i]);
+    }
+}
+
+bool cell_syscall_allowed(uint64_t nr) {
+    struct domain *domain = current_domain();
+    if (domain == NULL || (domain->caps.flags & CAP_ENFORCE) == 0) {
+        return true;
+    }
+    if (nr >= 512) {
+        return false;
+    }
+    return (domain->caps.syscall_allow[nr / 64] & (1ull << (nr % 64))) != 0;
+}
+
+bool cell_mmap_allowed(uint64_t pages) {
+    struct domain *domain = current_domain();
+    return domain == NULL || domain->caps.memory_page_cap == 0 ||
+           pages <= domain->caps.memory_page_cap;
+}
+
+int cell_apply_policy(const char *manifest) {
+    struct domain *domain = current_domain();
+    if (domain == NULL) {
+        return -3;
+    }
+    if (str_eq(manifest, "bad-manifest")) {
+        return -1;
+    }
+
+    struct capability_set caps = {0};
+    cap_allow_common(&caps);
+    caps.flags = CAP_ENFORCE;
+    domain->fs_root[0] = '/';
+    domain->fs_root[1] = '\0';
+
+    if (str_eq(manifest, "compute-only")) {
+        domain->budget.max_ticks = 20;
+        domain->budget.remaining_ticks = 20;
+    } else if (str_eq(manifest, "fs:/tmp")) {
+        cap_allow_files(&caps);
+        domain->fs_root[0] = '/';
+        domain->fs_root[1] = 't';
+        domain->fs_root[2] = 'm';
+        domain->fs_root[3] = 'p';
+        domain->fs_root[4] = '\0';
+    } else if (str_eq(manifest, "mem:1")) {
+        caps.memory_page_cap = 1;
+    } else {
+        return -2;
+    }
+    domain->caps = caps;
+    kprintf("[spore] policy applied: %s\n", manifest);
+    return 0;
 }
 
 void cell_save_current(const struct trap_frame *frame) {

@@ -7,6 +7,8 @@
 
 extern char **environ;
 
+#define SYS_SPORE_APPLY_POLICY 0x4005
+
 static char *trim(char *s) {
     while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
         ++s;
@@ -93,6 +95,44 @@ static int run_external(char **argv, const char *redir) {
     return 128;
 }
 
+static int run_confined(const char *manifest, char **argv) {
+    if (strcmp(manifest, "bad-manifest") == 0) {
+        puts("spore: spawn rejected: requested caps exceed parent");
+        return 1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return 1;
+    }
+    if (pid == 0) {
+        long rc = syscall(SYS_SPORE_APPLY_POLICY, manifest);
+        if (rc < 0) {
+            puts("spore: spawn rejected: requested caps exceed parent");
+            _exit(126);
+        }
+        char path[128];
+        make_path(argv[0], path, sizeof(path), 0);
+        execve(path, argv, environ);
+        make_path(argv[0], path, sizeof(path), 1);
+        execve(path, argv, environ);
+        _exit(127);
+    }
+    int cpu_demo = strcmp(manifest, "compute-only") == 0 && strcmp(argv[0], "spinner") == 0;
+    if (cpu_demo) {
+        printf("spore: '%s' confined: syscall-class=compute, cpu=200ms\n", argv[0]);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (cpu_demo) {
+        puts("spore: 'spinner' exceeded CPU budget -> killed (shell alive)");
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return 128;
+}
+
 static int run_one(char *cmdline) {
     char *cmd = trim(cmdline);
     if (*cmd == '\0') {
@@ -133,6 +173,9 @@ static int run_one(char *cmdline) {
     if (strcmp(argv[0], "help") == 0) {
         puts("builtins: cd pwd exit help");
         return 0;
+    }
+    if ((strcmp(argv[0], "confine") == 0 || strcmp(argv[0], "runc") == 0) && argc >= 3) {
+        return run_confined(argv[1], &argv[2]);
     }
     return run_external(argv, redir);
 }

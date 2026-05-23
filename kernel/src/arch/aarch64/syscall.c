@@ -79,6 +79,7 @@ enum {
     SYS_SPORE_REAP = 0x4002,
     SYS_SPORE_RESIDENT = 0x4003,
     SYS_SPORE_SET_BUDGET = 0x4004,
+    SYS_SPORE_APPLY_POLICY = 0x4005,
     MAP_PRIVATE = 0x02,
     MAP_FIXED = 0x10,
     MAP_ANONYMOUS = 0x20,
@@ -103,7 +104,9 @@ enum {
     DT_DIR = 4,
     EROFS = 30,
     ENOENT = 2,
+    EPERM = 1,
     EBADF = 9,
+    ENOMEM = 12,
     EFAULT = 14,
     EINVAL = 22,
     ENOTDIR = 20,
@@ -160,6 +163,7 @@ struct linux_dirent64_header {
 static struct user_address_space *current_as;
 static struct ramfs *sys_ramfs;
 static uint64_t rng_state = 0x73706f72652d7630ull;
+static bool path_policy_denied;
 
 static uint64_t align_down(uint64_t value, uint64_t align) {
     return value & ~(align - 1);
@@ -314,6 +318,25 @@ static bool normalize_path(const char *base, const char *path, char *out, size_t
 }
 
 static bool copy_resolved_path(uint64_t path_addr, char *out, size_t cap) {
+    path_policy_denied = false;
+    char raw[128];
+    if (!copy_string_from_user(path_addr, raw, sizeof(raw)) ||
+        !normalize_path(cell_current_cwd(), raw, out, cap)) {
+        return false;
+    }
+    const char *root = cell_current_fs_root();
+    if (!streq(root, "/")) {
+        size_t root_len = kstrlen(root);
+        if (kmemcmp(out, root, root_len) != 0 ||
+            (out[root_len] != '\0' && out[root_len] != '/')) {
+            path_policy_denied = true;
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool copy_exec_path(uint64_t path_addr, char *out, size_t cap) {
     char raw[128];
     return copy_string_from_user(path_addr, raw, sizeof(raw)) &&
            normalize_path(cell_current_cwd(), raw, out, cap);
@@ -445,6 +468,9 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t fla
     if (end < raw_end) {
         return -(int64_t)EINVAL;
     }
+    if (!cell_mmap_allowed((end - base) / PAGE_SIZE)) {
+        return -(int64_t)ENOMEM;
+    }
     if ((flags & MAP_FIXED) != 0) {
         (void)cell_remove_vma(base, end);
     }
@@ -532,7 +558,7 @@ static int64_t sys_clone(struct trap_frame *f, uint64_t flags, uint64_t newsp) {
 
 static int64_t sys_execve(struct trap_frame *frame, uint64_t path_addr, uint64_t argv_addr, uint64_t envp_addr) {
     char path[128];
-    if (!copy_resolved_path(path_addr, path, sizeof(path))) {
+    if (!copy_exec_path(path_addr, path, sizeof(path))) {
         return -(int64_t)EFAULT;
     }
 
@@ -585,7 +611,7 @@ static int64_t sys_openat(uint64_t dirfd, uint64_t path_addr, uint64_t flags) {
     }
     char path[128];
     if (!copy_resolved_path(path_addr, path, sizeof(path))) {
-        return -(int64_t)EFAULT;
+        return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
     }
     struct ramfs_node node;
     if (!ramfs_lookup_node(sys_ramfs, path, &node)) {
@@ -626,7 +652,7 @@ static int64_t sys_newfstatat(uint64_t dirfd, uint64_t path_addr, uint64_t stat_
     (void)dirfd;
     char path[128];
     if (!copy_resolved_path(path_addr, path, sizeof(path))) {
-        return -(int64_t)EFAULT;
+        return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
     }
     struct ramfs_node node;
     if (!ramfs_lookup_node(sys_ramfs, path, &node)) {
@@ -687,7 +713,7 @@ static int64_t sys_getcwd(uint64_t buf, uint64_t len) {
 static int64_t sys_chdir(uint64_t path_addr) {
     char path[128];
     if (!copy_resolved_path(path_addr, path, sizeof(path))) {
-        return -(int64_t)EFAULT;
+        return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
     }
     struct ramfs_node node;
     if (!ramfs_lookup_node(sys_ramfs, path, &node)) {
@@ -705,7 +731,7 @@ static int64_t sys_mkdirat(uint64_t dirfd, uint64_t path_addr) {
     }
     char path[128];
     if (!copy_resolved_path(path_addr, path, sizeof(path))) {
-        return -(int64_t)EFAULT;
+        return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
     }
     return ramfs_mkdir(sys_ramfs, path) ? 0 : -(int64_t)EINVAL;
 }
@@ -716,7 +742,7 @@ static int64_t sys_unlinkat(uint64_t dirfd, uint64_t path_addr) {
     }
     char path[128];
     if (!copy_resolved_path(path_addr, path, sizeof(path))) {
-        return -(int64_t)EFAULT;
+        return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
     }
     return ramfs_unlink(sys_ramfs, path) ? 0 : -(int64_t)ENOTEMPTY;
 }
@@ -729,7 +755,7 @@ static int64_t sys_renameat(uint64_t old_dirfd, uint64_t old_path_addr, uint64_t
     char new_path[128];
     if (!copy_resolved_path(old_path_addr, old_path, sizeof(old_path)) ||
         !copy_resolved_path(new_path_addr, new_path, sizeof(new_path))) {
-        return -(int64_t)EFAULT;
+        return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
     }
     return ramfs_rename(sys_ramfs, old_path, new_path) ? 0 : -(int64_t)ENOENT;
 }
@@ -769,6 +795,11 @@ static int64_t dispatch(struct trap_frame *f) {
     uint64_t a3 = f->x[3];
     uint64_t a4 = f->x[4];
     (void)a4;
+
+    if (!cell_syscall_allowed(nr)) {
+        kprintf("[spore] syscall denied nr=%d\n", (int)nr);
+        return -(int64_t)EPERM;
+    }
 
     switch (nr) {
     case SYS_SCHED_YIELD:
@@ -823,6 +854,14 @@ static int64_t dispatch(struct trap_frame *f) {
         return (int64_t)cell_resident_pages(a0, a0 + a1);
     case SYS_SPORE_SET_BUDGET:
         return cell_set_budget((int)a0, a1);
+    case SYS_SPORE_APPLY_POLICY: {
+        char manifest[64];
+        if (!copy_string_from_user(a0, manifest, sizeof(manifest))) {
+            return -(int64_t)EFAULT;
+        }
+        int rc = cell_apply_policy(manifest);
+        return rc == 0 ? 0 : -(int64_t)EPERM;
+    }
     case SYS_BRK:
         return sys_brk(a0);
     case SYS_MMAP:

@@ -60,6 +60,8 @@ struct capability_set {
     uint64_t syscall_allow[8];
     uint64_t fs_rights;
     uint64_t flags;
+    uint64_t memory_page_cap;
+    uint64_t max_domains;
 };
 
 struct cpu_budget {
@@ -110,6 +112,10 @@ int cell_current_tid(void);
 int cell_current_ppid(void);
 const char *cell_current_cwd(void);
 bool cell_set_cwd(const char *path);
+const char *cell_current_fs_root(void);
+bool cell_syscall_allowed(uint64_t nr);
+int cell_apply_policy(const char *manifest);
+bool cell_mmap_allowed(uint64_t pages);
 void cell_save_current(const struct trap_frame *frame);
 void cell_restore_current(struct trap_frame *frame);
 void cell_schedule(struct trap_frame *frame);
