@@ -25,11 +25,12 @@ struct ext2_fs {
   uint32_t block_count;
 };
 
-struct ext2_node {
+struct __attribute__((aligned(8))) ext2_node {
   uint32_t ino;
   uint16_t mode;
   uint16_t links_count;
   uint32_t size;
+  uint32_t sectors_count;
   uint32_t blocks[15];
 };
 

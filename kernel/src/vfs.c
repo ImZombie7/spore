@@ -323,6 +323,21 @@ bool vfs_lookup(const char *path, struct vfs_node *out) {
   return lookup_ramfs(path, out);
 }
 
+bool vfs_lstat(const char *path, struct vfs_node *out) {
+  if (ramfs_route(path)) {
+    if (lookup_proc_dynamic(path, out)) { return true; }
+    if (lookup_ramfs(path, out)) { return true; }
+  }
+  if (root_ext2 != NULL) {
+    struct ext2_node node;
+    if (ext2_lstat(root_ext2, path, &node)) {
+      from_ext2(&node, out);
+      return true;
+    }
+  }
+  return lookup_ramfs(path, out);
+}
+
 bool vfs_lookup_exec(const char *path, const void **data, uint64_t *size) {
   if (root_ext2 != NULL) {
     struct ext2_node node;

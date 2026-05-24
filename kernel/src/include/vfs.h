@@ -56,6 +56,7 @@ struct vfs_mount_info {
 
 void vfs_init(struct ramfs *ramfs, struct ext2_fs *ext2, uint64_t hhdm_offset);
 bool vfs_lookup(const char *path, struct vfs_node *out);
+bool vfs_lstat(const char *path, struct vfs_node *out);
 bool vfs_lookup_exec(const char *path, const void **data, uint64_t *size);
 bool vfs_mkdir(const char *path);
 bool vfs_create(const char *path, struct vfs_node *out);

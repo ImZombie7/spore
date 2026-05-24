@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 
 struct opts {
   bool all;
@@ -38,14 +39,23 @@ static int join_path(char *out, size_t cap, const char *dir, const char *name) {
   return n >= 0 && n < (int)cap ? 0 : -1;
 }
 
-static unsigned long long du_path(const char *path, const struct opts *opts, bool top, int *rc) {
+static unsigned long long du_path(const char *path, const struct opts *opts, bool top, dev_t root_dev, int *rc) {
   struct stat st;
-  if (stat(path, &st) != 0) {
+  if (lstat(path, &st) != 0) {
     perror(path);
     *rc = EXIT_FAILURE;
     return 0;
   }
+  if (!top && st.st_dev != root_dev) { return 0; }
   unsigned long long total = node_blocks(&st);
+  if (S_ISLNK(st.st_mode)) {
+    if (opts->all) {
+      char size[32];
+      fmt_blocks(total, opts->human, size, sizeof(size));
+      printf("%s\t%s\n", size, path);
+    }
+    return total;
+  }
   if (S_ISDIR(st.st_mode)) {
     DIR *dir = opendir(path);
     if (dir == NULL) {
@@ -56,7 +66,9 @@ static unsigned long long du_path(const char *path, const struct opts *opts, boo
       while ((ent = readdir(dir)) != NULL) {
         if (streq(ent->d_name, ".") || streq(ent->d_name, "..")) { continue; }
         char child[256];
-        if (join_path(child, sizeof(child), path, ent->d_name) == 0) { total += du_path(child, opts, false, rc); }
+        if (join_path(child, sizeof(child), path, ent->d_name) == 0) {
+          total += du_path(child, opts, false, root_dev, rc);
+        }
       }
       closedir(dir);
     }
@@ -93,10 +105,21 @@ int main(int argc, char **argv) {
   }
   int rc = EXIT_SUCCESS;
   if (first == argc) {
-    (void)du_path(".", &opts, true, &rc);
+    struct stat st;
+    if (lstat(".", &st) != 0) {
+      perror(".");
+      return EXIT_FAILURE;
+    }
+    (void)du_path(".", &opts, true, st.st_dev, &rc);
   } else {
     for (int i = first; i < argc; ++i) {
-      unsigned long long total = du_path(argv[i], &opts, true, &rc);
+      struct stat st;
+      if (lstat(argv[i], &st) != 0) {
+        perror(argv[i]);
+        rc = EXIT_FAILURE;
+        continue;
+      }
+      unsigned long long total = du_path(argv[i], &opts, true, st.st_dev, &rc);
       if (opts.summary) {
         char size[32];
         fmt_blocks(total, opts.human, size, sizeof(size));

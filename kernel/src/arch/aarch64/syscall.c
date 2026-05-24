@@ -1163,7 +1163,8 @@ static int64_t sys_statx(uint64_t dirfd, uint64_t path_addr, uint64_t flags, uin
   if (!copy_resolved_path(path_addr, path, sizeof(path))) {
     return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
   }
-  if (!vfs_lookup(path, &node)) { return -(int64_t)ENOENT; }
+  bool nofollow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
+  if (!(nofollow ? vfs_lstat(path, &node) : vfs_lookup(path, &node))) { return -(int64_t)ENOENT; }
   struct statx64 st;
   fill_statx(&st, &node);
   return user_writable(statx_addr, sizeof(st)) && vmm_copy_to_user(active_as(), statx_addr, &st, sizeof(st))
@@ -1171,14 +1172,15 @@ static int64_t sys_statx(uint64_t dirfd, uint64_t path_addr, uint64_t flags, uin
            : -(int64_t)EFAULT;
 }
 
-static int64_t sys_newfstatat(uint64_t dirfd, uint64_t path_addr, uint64_t stat_addr) {
+static int64_t sys_newfstatat(uint64_t dirfd, uint64_t path_addr, uint64_t stat_addr, uint64_t flags) {
   (void)dirfd;
   char path[128];
   if (!copy_resolved_path(path_addr, path, sizeof(path))) {
     return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
   }
   struct vfs_node node;
-  if (!vfs_lookup(path, &node)) { return -(int64_t)ENOENT; }
+  bool nofollow = (flags & AT_SYMLINK_NOFOLLOW) != 0;
+  if (!(nofollow ? vfs_lstat(path, &node) : vfs_lookup(path, &node))) { return -(int64_t)ENOENT; }
   struct stat64_aarch64 st;
   fill_stat(&st, &node);
   return user_writable(stat_addr, sizeof(st)) && vmm_copy_to_user(active_as(), stat_addr, &st, sizeof(st))
@@ -1738,7 +1740,7 @@ l_lseek:
 l_fstat:
   return sys_fstat(a0, a1);
 l_newfstatat:
-  return sys_newfstatat(a0, a1, a2);
+  return sys_newfstatat(a0, a1, a2, a3);
 l_getdents64:
   return sys_getdents64(a0, a1, a2);
 l_readlinkat:

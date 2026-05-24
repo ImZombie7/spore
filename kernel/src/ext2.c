@@ -229,6 +229,7 @@ static bool read_inode(struct ext2_fs *fs, uint32_t ino, struct ext2_node *out) 
   out->mode = inode.mode;
   out->links_count = inode.links_count;
   out->size = inode.size;
+  out->sectors_count = inode.sectors_count;
   for (size_t i = 0; i < 15; ++i) {
     out->blocks[i] = inode.block[i];
   }
@@ -252,7 +253,9 @@ static bool write_inode(struct ext2_fs *fs, const struct ext2_node *node) {
   inode.mode = node->mode;
   inode.size = node->size;
   inode.links_count = node->links_count;
-  inode.sectors_count = ((node->size + 511) / 512);
+  inode.sectors_count = ext2_is_symlink(node) && node->sectors_count == 0 && node->size <= sizeof(node->blocks)
+                          ? 0
+                          : ((node->size + 511) / 512);
   for (size_t i = 0; i < 15; ++i) {
     inode.block[i] = node->blocks[i];
   }
@@ -733,7 +736,12 @@ static bool ext2_readlink_node(struct ext2_fs *fs, const struct ext2_node *node,
   uint32_t len = node->size;
   if ((size_t)len >= cap) { len = (uint32_t)(cap - 1); }
   uint32_t got = 0;
-  if (!ext2_read_file(fs, node, 0, out, len, &got) || got != len) { return false; }
+  if (node->sectors_count == 0 && node->size <= sizeof(node->blocks)) {
+    kmemcpy(out, node->blocks, len);
+    got = len;
+  } else if (!ext2_read_file(fs, node, 0, out, len, &got) || got != len) {
+    return false;
+  }
   out[len] = '\0';
   if (len_out != NULL) { *len_out = len; }
   return true;
