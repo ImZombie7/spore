@@ -125,7 +125,7 @@ static const char *shell_commands[] = {
   "confine fs:/tmp /demos/writer /tmp/d/out\n",
   "confine mem:1 /demos/memhog\n",
   "runc bad-manifest /demos/escalate\n",
-  "shutdown\n",
+  "sudo shutdown\n",
 };
 
 static void usage(void) {
