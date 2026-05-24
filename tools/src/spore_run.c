@@ -588,6 +588,7 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
   size_t len = 0;
   size_t sent = 0;
   bool stdin_sent = false;
+  bool shell_size_sent = false;
   bool plain = strcmp(mode, "plain") == 0;
   bool interactive = plain;
   struct termios saved_termios;
@@ -695,6 +696,10 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
         }
       }
       if (len > 0) {
+        if (!shell_size_sent && contains(buf, " $ ")) {
+          send_terminal_size(in_pipe[1]);
+          shell_size_sent = true;
+        }
         if (strcmp(mode, "stdin") == 0 && !stdin_sent &&
             contains(buf, "[spore] stdin demo: child blocking on read(0)")) {
           write(in_pipe[1], "z\n", 2);
