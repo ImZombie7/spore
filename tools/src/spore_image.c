@@ -205,7 +205,7 @@ static void compile_or_copy_userland(const char *source_root, const char *source
     argv[argc++] = (char *)out;
     argv[argc] = NULL;
     run_argv(argv, false);
-  } else {
+  } else if (strstr(src, ".c") == src + strlen(src) - 2) {
     bool static_binary = strcmp(source, "userland/bin/init") == 0;
     char *const argv[] = {
       "aarch64-unknown-linux-musl-gcc",
@@ -220,6 +220,8 @@ static void compile_or_copy_userland(const char *source_root, const char *source
       NULL,
     };
     run_argv(argv, false);
+  } else {
+    copy_file(src, out);
   }
 }
 

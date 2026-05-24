@@ -268,6 +268,7 @@ void ramfs_init(struct ramfs *fs, const struct spore_boot_module *modules, uint3
   set_mount(fs, tmp, RAMFS_MOUNT_TMP);
   (void)add_node(fs, dev, "fs", true, true);
   (void)add_node(fs, dev, "blk", true, true);
+  (void)add_node(fs, proc, "net", true, true);
   (void)add_ro_file(fs, "/etc/motd", motd, sizeof(motd) - 1);
   (void)add_device(fs, "/dev/null", RAMFS_DEV_NULL);
   (void)add_device(fs, "/dev/zero", RAMFS_DEV_ZERO);
@@ -287,8 +288,10 @@ void ramfs_init(struct ramfs *fs, const struct spore_boot_module *modules, uint3
   (void)add_device(fs, "/proc/meminfo", RAMFS_DEV_MEMINFO);
   (void)add_device(fs, "/proc/cpuinfo", RAMFS_DEV_CPUINFO);
   (void)add_device(fs, "/proc/uptime", RAMFS_DEV_UPTIME);
+  (void)add_device(fs, "/proc/loadavg", RAMFS_DEV_LOADAVG);
   (void)add_device(fs, "/proc/mounts", RAMFS_DEV_MOUNTS);
   (void)add_device(fs, "/proc/stat", RAMFS_DEV_STAT);
+  (void)add_device(fs, "/proc/net/dev", RAMFS_DEV_NET_DEV);
   (void)add_device(fs, "/proc/filesystems", RAMFS_DEV_FILESYSTEMS);
   (void)add_device(fs, "/proc/partitions", RAMFS_DEV_PARTITIONS);
   (void)add_device(fs, "/proc/devices", RAMFS_DEV_DEVICES);

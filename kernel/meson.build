@@ -107,6 +107,7 @@ image = custom_target('image.img',
   input: [
     kernel_elf,
     files('../userland/image.manifest'),
+    userland_image_data,
     boot_efi,
   ],
   output: ['image.img', 'root.ext2'],

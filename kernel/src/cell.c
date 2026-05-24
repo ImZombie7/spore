@@ -8,6 +8,7 @@
 #include "pl011.h"
 #include "vfs.h"
 #include "virtio_blk.h"
+#include "virtio_net.h"
 
 static struct domain domains[MAX_DOMAINS];
 static struct thread threads[MAX_THREADS];
@@ -1368,6 +1369,25 @@ static size_t uptime_text(char *dst, size_t cap) {
   return len;
 }
 
+static size_t loadavg_text(char *dst, size_t cap) {
+  size_t len = 0;
+  uint64_t runnable = 0;
+  uint64_t total = 0;
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    if (threads[i].domain == NULL) { continue; }
+    ++total;
+    if (threads[i].state == THREAD_RUNNABLE) { ++runnable; }
+  }
+  proc_append_str(dst, cap, &len, "0.00 0.00 0.00 ");
+  proc_append_u64(dst, cap, &len, runnable);
+  proc_append_char(dst, cap, &len, '/');
+  proc_append_u64(dst, cap, &len, total);
+  proc_append_char(dst, cap, &len, ' ');
+  proc_append_u64(dst, cap, &len, (uint32_t)(next_domain_id - 1));
+  proc_append_char(dst, cap, &len, '\n');
+  return len;
+}
+
 static size_t mounts_text(char *dst, size_t cap) {
   size_t len = 0;
   proc_append_str(dst, cap, &len,
@@ -1377,6 +1397,25 @@ static size_t mounts_text(char *dst, size_t cap) {
                   "ramfs /dev/fs/ram0 ramfs ro 0 0\n"
                   "proc /proc proc ro 0 0\n"
                   "dev /dev devfs rw 0 0\n");
+  return len;
+}
+
+static size_t net_dev_text(char *dst, size_t cap) {
+  size_t len = 0;
+  struct virtio_net_stats stats = virtio_net_stats();
+  proc_append_str(dst, cap, &len,
+                  "Inter-|   Receive                                                |  Transmit\n"
+                  " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo "
+                  "colls carrier compressed\n"
+                  "  eth0: ");
+  proc_append_u64(dst, cap, &len, stats.rx_bytes);
+  proc_append_char(dst, cap, &len, ' ');
+  proc_append_u64(dst, cap, &len, stats.rx_packets);
+  proc_append_str(dst, cap, &len, " 0 0 0 0 0 0 ");
+  proc_append_u64(dst, cap, &len, stats.tx_bytes);
+  proc_append_char(dst, cap, &len, ' ');
+  proc_append_u64(dst, cap, &len, stats.tx_packets);
+  proc_append_str(dst, cap, &len, " 0 0 0 0 0 0\n");
   return len;
 }
 
@@ -1591,8 +1630,10 @@ static int64_t write_device(struct open_file *file, struct domain *domain, uint6
   case RAMFS_DEV_MEMINFO:
   case RAMFS_DEV_CPUINFO:
   case RAMFS_DEV_UPTIME:
+  case RAMFS_DEV_LOADAVG:
   case RAMFS_DEV_MOUNTS:
   case RAMFS_DEV_STAT:
+  case RAMFS_DEV_NET_DEV:
   case RAMFS_DEV_FILESYSTEMS:
   case RAMFS_DEV_PARTITIONS:
   case RAMFS_DEV_DEVICES:
@@ -1663,10 +1704,14 @@ static int64_t read_device(struct open_file *file, struct domain *domain, uint64
     return read_generated_device(file, domain, buf, len, cpuinfo_text);
   case RAMFS_DEV_UPTIME:
     return read_generated_device(file, domain, buf, len, uptime_text);
+  case RAMFS_DEV_LOADAVG:
+    return read_generated_device(file, domain, buf, len, loadavg_text);
   case RAMFS_DEV_MOUNTS:
     return read_generated_device(file, domain, buf, len, mounts_text);
   case RAMFS_DEV_STAT:
     return read_generated_device(file, domain, buf, len, stat_text);
+  case RAMFS_DEV_NET_DEV:
+    return read_generated_device(file, domain, buf, len, net_dev_text);
   case RAMFS_DEV_FILESYSTEMS:
     return read_generated_device(file, domain, buf, len, filesystems_text);
   case RAMFS_DEV_PARTITIONS:

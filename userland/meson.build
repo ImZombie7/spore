@@ -20,6 +20,10 @@ userland_static_cc = [
 ]
 userland_image_targets = []
 userland_test_targets = []
+userland_image_data = files(
+  'etc/fastfetch/config.jsonc',
+  'etc/fastfetch/spore.logo',
+)
 
 subdir('lib/spore')
 

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    "source": "/etc/fastfetch/spore.logo",
+    "color": {
+      "1": "green",
+      "2": "cyan",
+      "3": "blue"
+    },
+    "padding": { "right": 2 }
+  },
+  "display": {
+    "color": { "keys": "cyan", "title": "green" }
+  },
+  "modules": [
+    "title",
+    "separator",
+    "os",
+    "kernel",
+    "uptime",
+    "processes",
+    "shell",
+    "cpu",
+    "cpuusage",
+    "memory",
+    "disk",
+    "datetime",
+    "break",
+    "colors",
+    "break"
+  ]
+}

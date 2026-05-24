@@ -97,6 +97,8 @@ static uint64_t tx_pa;
 static uint8_t *tx_buf;
 static uint64_t tx_packets;
 static uint64_t rx_packets;
+static uint64_t tx_bytes;
+static uint64_t rx_bytes;
 
 static volatile uint32_t *reg32(uint64_t offset) {
   return (volatile uint32_t *)(uintptr_t)(hhdm + mmio_base + offset);
@@ -233,6 +235,8 @@ bool virtio_net_init(uint64_t hhdm_offset) {
   net_ready = true;
   tx_packets = 0;
   rx_packets = 0;
+  tx_bytes = 0;
+  rx_bytes = 0;
   kprintf("[spore] virtio-net: mmio %p up rxq=%u txq=%u\n", (void *)(uintptr_t)mmio_base, (unsigned)QUEUE_SIZE,
           (unsigned)QUEUE_SIZE);
   return true;
@@ -250,6 +254,7 @@ void virtio_net_poll(void) {
     if (elem.id < QUEUE_SIZE && elem.len > NET_HDR_SIZE) {
       uint32_t frame_len = elem.len - NET_HDR_SIZE;
       ++rx_packets;
+      rx_bytes += frame_len;
       net_receive_ethernet(rx_buf[elem.id] + NET_HDR_SIZE, frame_len);
       rx_refill((uint16_t)elem.id);
     }
@@ -278,6 +283,7 @@ bool virtio_net_send_frame(const void *frame, uint32_t len) {
     if (txq.used->idx != txq.used_idx) {
       txq.used_idx++;
       ++tx_packets;
+      tx_bytes += len;
       return true;
     }
   }
@@ -298,4 +304,13 @@ bool virtio_net_smoke_tx(void) {
   kprintf("[spore] virtio-net: tx smoke %s len=%u\n", ok ? "PASS" : "TIMEOUT",
           (unsigned)(sizeof(frame) + NET_HDR_SIZE));
   return ok;
+}
+
+struct virtio_net_stats virtio_net_stats(void) {
+  return (struct virtio_net_stats){
+    .rx_bytes = rx_bytes,
+    .rx_packets = rx_packets,
+    .tx_bytes = tx_bytes,
+    .tx_packets = tx_packets,
+  };
 }
