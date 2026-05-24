@@ -23,6 +23,14 @@ enum {
     EAGAIN = 11,
     EFAULT = 14,
     EINVAL = 22,
+    ROBUST_LIST_LIMIT = 16,
+    FUTEX_OWNER_DIED = 0x40000000u,
+};
+
+struct robust_list_head64 {
+    uint64_t next;
+    int64_t futex_offset;
+    uint64_t pending;
 };
 
 static bool str_eq(const char *a, const char *b) {
@@ -242,6 +250,46 @@ static int futex_wake(struct domain *domain, uint64_t uaddr, uint32_t count) {
         }
     }
     return woke;
+}
+
+static void robust_wake_entry(struct domain *domain, uint64_t entry, int64_t futex_offset) {
+    uint64_t futex_addr = (uint64_t)((int64_t)entry + futex_offset);
+    if ((futex_addr & 3u) != 0 ||
+        !cell_ensure_user_range(futex_addr, sizeof(uint32_t), VMM_ACCESS_WRITE)) {
+        return;
+    }
+    uint32_t word = 0;
+    if (!vmm_copy_from_user(&domain->as, &word, futex_addr, sizeof(word))) {
+        return;
+    }
+    word |= FUTEX_OWNER_DIED;
+    (void)vmm_copy_to_user(&domain->as, futex_addr, &word, sizeof(word));
+    (void)futex_wake(domain, futex_addr, 1);
+}
+
+static void cleanup_robust_list(struct thread *thread) {
+    struct domain *domain = thread->domain;
+    if (domain == NULL || thread->robust_list == 0 ||
+        !cell_ensure_user_range(thread->robust_list, sizeof(struct robust_list_head64), VMM_ACCESS_READ)) {
+        return;
+    }
+    struct robust_list_head64 head;
+    if (!vmm_copy_from_user(&domain->as, &head, thread->robust_list, sizeof(head))) {
+        return;
+    }
+    if (head.pending != 0) {
+        robust_wake_entry(domain, head.pending, head.futex_offset);
+    }
+    uint64_t node = head.next;
+    for (size_t i = 0; i < ROBUST_LIST_LIMIT && node != 0 && node != thread->robust_list; ++i) {
+        uint64_t next = 0;
+        if (!cell_ensure_user_range(node, sizeof(next), VMM_ACCESS_READ) ||
+            !vmm_copy_from_user(&domain->as, &next, node, sizeof(next))) {
+            break;
+        }
+        robust_wake_entry(domain, node, head.futex_offset);
+        node = next;
+    }
 }
 
 static void wake_parent_of(struct domain *child) {
@@ -508,6 +556,7 @@ void cell_exit_thread_current(int status, struct trap_frame *frame) {
         return;
     }
     struct domain *domain = current_thread->domain;
+    cleanup_robust_list(current_thread);
     if (current_thread->clear_child_tid != 0) {
         uint32_t zero = 0;
         (void)vmm_copy_to_user(&domain->as, current_thread->clear_child_tid, &zero, sizeof(zero));

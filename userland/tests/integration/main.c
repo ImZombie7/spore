@@ -1,5 +1,6 @@
 #include <dirent.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <sched.h>
 #include <stdio.h>
@@ -331,6 +332,43 @@ static int phase_b_futex_demo(void) {
     return ok;
 }
 
+static pthread_mutex_t pthread_demo_lock = PTHREAD_MUTEX_INITIALIZER;
+static int pthread_demo_counter;
+
+static void *phase_c_pthread_worker(void *arg) {
+    long slot = (long)arg;
+    for (int i = 0; i < 1000; ++i) {
+        pthread_mutex_lock(&pthread_demo_lock);
+        ++pthread_demo_counter;
+        pthread_mutex_unlock(&pthread_demo_lock);
+    }
+    return (void *)(slot + 0x100);
+}
+
+static int phase_c_pthread_demo(void) {
+    enum { THREADS = 8 };
+    pthread_t threads[THREADS];
+    pthread_demo_counter = 0;
+    for (long i = 0; i < THREADS; ++i) {
+        if (pthread_create(&threads[i], NULL, phase_c_pthread_worker, (void *)i) != 0) {
+            printf("[spore] v3c pthread create/join: FAIL create %ld\n", i);
+            return 0;
+        }
+    }
+    int ok = 1;
+    for (long i = 0; i < THREADS; ++i) {
+        void *ret = NULL;
+        if (pthread_join(threads[i], &ret) != 0 || ret != (void *)(i + 0x100)) {
+            ok = 0;
+        }
+    }
+    ok = ok && pthread_demo_counter == THREADS * 1000;
+    printf("[spore] v3c pthread create/join: %s counter=%d\n",
+           ok ? "PASS" : "FAIL",
+           pthread_demo_counter);
+    return ok;
+}
+
 static int phase_d_fs_demo(void) {
     int ok = 1;
     if (mkdir("/tmp/spore-demo-d", 0777) != 0) {
@@ -453,6 +491,8 @@ int main(void) {
     ok_all = ok_all && ok_v3a;
     int ok_v3b = phase_b_futex_demo();
     ok_all = ok_all && ok_v3b;
+    int ok_v3c = phase_c_pthread_demo();
+    ok_all = ok_all && ok_v3c;
 
     if (after_touch <= before || after_free >= after_touch) {
         ok_all = 0;
