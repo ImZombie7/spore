@@ -1,7 +1,5 @@
-#include "spore.h"
-
+#include <spore.h>
 #include <stdlib.h>
-
 #include <stdio.h>
 #include <sys/stat.h>
 

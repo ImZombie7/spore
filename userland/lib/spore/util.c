@@ -1,5 +1,4 @@
-#include "spore.h"
-
+#include <spore.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -25,6 +24,6 @@ const char *basename(const char *path) {
   return name;
 }
 
-int streq(const char *a, const char *b) {
+bool streq(const char *a, const char *b) {
   return strcmp(a, b) == 0;
 }

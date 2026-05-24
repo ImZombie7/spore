@@ -1,9 +1,8 @@
 #pragma once
 
+#include <spore.h>
 #include <stdbool.h>
 #include <stddef.h>
-
-#include "spore.h"
 
 extern char **environ;
 

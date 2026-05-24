@@ -1,7 +1,5 @@
-#include "spore.h"
-
+#include <spore.h>
 #include <stdlib.h>
-
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>

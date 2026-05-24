@@ -1,5 +1,4 @@
-#include "spore.h"
-
+#include <spore.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
