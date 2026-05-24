@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -34,13 +35,20 @@ static const char *shell_commands[] = {
 };
 
 static void usage(void) {
-  fputs("usage: spore-run [--mode plain|filter|shell|stdin] --image IMAGE [--qemu QEMU] [--accel ACCEL] [--cpu CPU]\n",
+  fputs("usage: spore-run [--mode plain|filter|shell|stdin] [--timings] --image IMAGE [--qemu QEMU] [--accel ACCEL] "
+        "[--cpu CPU] [--vars VARS_FD]\n",
         stderr);
   exit(2);
 }
 
 static bool contains(const char *haystack, const char *needle) {
   return strstr(haystack, needle) != NULL;
+}
+
+static bool ends_with(const char *s, const char *suffix) {
+  size_t s_len = strlen(s);
+  size_t suffix_len = strlen(suffix);
+  return s_len >= suffix_len && strcmp(s + s_len - suffix_len, suffix) == 0;
 }
 
 static bool find_firmware(const char *qemu, char *out, size_t cap) {
@@ -69,14 +77,97 @@ static bool find_firmware(const char *qemu, char *out, size_t cap) {
   return access(out, R_OK) == 0;
 }
 
+static bool find_vars_template(const char *qemu, char *out, size_t cap) {
+  char cmd[PATH_CAP];
+  snprintf(cmd, sizeof(cmd), "%s -L help 2>/dev/null", qemu);
+  FILE *pipe = popen(cmd, "r");
+  if (pipe != NULL) {
+    char dir[PATH_CAP];
+    while (fscanf(pipe, "%1023s", dir) == 1) {
+      char base[PATH_CAP];
+      snprintf(base, sizeof(base), "%s", dir);
+      char *suffix = strstr(base, "-firmware");
+      if (suffix != NULL) { *suffix = '\0'; }
+      const char *patterns[] = {
+        "%s/edk2-arm-vars.fd",
+        "%s/edk2-aarch64-vars.fd",
+        "%s/qemu/edk2-arm-vars.fd",
+        "%s/qemu/edk2-aarch64-vars.fd",
+      };
+      for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); ++i) {
+        snprintf(out, cap, patterns[i], i < 2 ? dir : base);
+        if (access(out, R_OK) == 0) {
+          pclose(pipe);
+          return true;
+        }
+      }
+    }
+    pclose(pipe);
+  }
+  const char *fallbacks[] = {
+    "/opt/homebrew/opt/qemu/share/qemu/edk2-arm-vars.fd",
+    "/opt/homebrew/opt/qemu/share/qemu/edk2-aarch64-vars.fd",
+  };
+  for (size_t i = 0; i < sizeof(fallbacks) / sizeof(fallbacks[0]); ++i) {
+    snprintf(out, cap, "%s", fallbacks[i]);
+    if (access(out, R_OK) == 0) { return true; }
+  }
+  return false;
+}
+
+static void copy_file_or_die(const char *src, const char *dst) {
+  FILE *in = fopen(src, "rb");
+  if (in == NULL) {
+    perror(src);
+    exit(1);
+  }
+  FILE *out = fopen(dst, "wb");
+  if (out == NULL) {
+    perror(dst);
+    fclose(in);
+    exit(1);
+  }
+  char buf[65536];
+  for (;;) {
+    size_t n = fread(buf, 1, sizeof(buf), in);
+    if (n > 0 && fwrite(buf, 1, n, out) != n) {
+      perror(dst);
+      exit(1);
+    }
+    if (n < sizeof(buf)) {
+      if (ferror(in)) {
+        perror(src);
+        exit(1);
+      }
+      break;
+    }
+  }
+  fclose(in);
+  fclose(out);
+}
+
+static void ensure_vars_file(const char *qemu, const char *vars) {
+  if (vars == NULL || access(vars, R_OK | W_OK) == 0) { return; }
+  char tmpl[PATH_CAP];
+  if (!find_vars_template(qemu, tmpl, sizeof(tmpl))) {
+    fputs("spore-run: edk2 vars template not found\n", stderr);
+    exit(1);
+  }
+  copy_file_or_die(tmpl, vars);
+}
+
 static void build_qemu_args(char **argv, int *argc, const char *qemu, const char *image, const char *accel,
-                            const char *cpu, char *drive_arg, size_t drive_cap) {
+                            const char *cpu, const char *vars, char *firmware_arg, size_t firmware_cap,
+                            char *vars_arg, size_t vars_cap, char *image_drive_arg, size_t image_drive_cap) {
   char firmware[PATH_CAP];
   if (!find_firmware(qemu, firmware, sizeof(firmware))) {
     fputs("spore-run: edk2-aarch64-code.fd not found\n", stderr);
     exit(1);
   }
-  snprintf(drive_arg, drive_cap, "if=pflash,format=raw,readonly=on,file=%s", firmware);
+  ensure_vars_file(qemu, vars);
+  snprintf(firmware_arg, firmware_cap, "if=pflash,format=raw,readonly=on,file=%s", firmware);
+  if (vars != NULL) { snprintf(vars_arg, vars_cap, "if=pflash,format=raw,file=%s", vars); }
+  snprintf(image_drive_arg, image_drive_cap, "if=none,format=raw,readonly=on,file=%s,id=sporeesp", image);
   int i = 0;
   argv[i++] = (char *)qemu;
   argv[i++] = "-M";
@@ -96,9 +187,20 @@ static void build_qemu_args(char **argv, int *argc, const char *qemu, const char
   argv[i++] = "-boot";
   argv[i++] = "order=d,menu=off,strict=on";
   argv[i++] = "-drive";
-  argv[i++] = drive_arg;
-  argv[i++] = "-cdrom";
-  argv[i++] = (char *)image;
+  argv[i++] = firmware_arg;
+  if (vars != NULL) {
+    argv[i++] = "-drive";
+    argv[i++] = vars_arg;
+  }
+  if (ends_with(image, ".iso")) {
+    argv[i++] = "-cdrom";
+    argv[i++] = (char *)image;
+  } else {
+    argv[i++] = "-drive";
+    argv[i++] = image_drive_arg;
+    argv[i++] = "-device";
+    argv[i++] = "virtio-blk-device,drive=sporeesp,bootindex=0";
+  }
   argv[i++] = "-serial";
   argv[i++] = "stdio";
   argv[i++] = "-display";
@@ -107,16 +209,56 @@ static void build_qemu_args(char **argv, int *argc, const char *qemu, const char
   *argc = i;
 }
 
-static int run_plain(char **qemu_argv) {
-  execvp(qemu_argv[0], qemu_argv);
-  perror(qemu_argv[0]);
-  return 127;
-}
-
 static double now_seconds(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+struct csi_filter {
+  int state;
+};
+
+static void write_sanitized(struct csi_filter *filter, const char *data, size_t len) {
+  for (size_t i = 0; i < len; ++i) {
+    unsigned char c = (unsigned char)data[i];
+    if (filter->state == 0) {
+      if (c == 0x1b) {
+        filter->state = 1;
+      } else {
+        fwrite(&data[i], 1, 1, stdout);
+      }
+    } else if (filter->state == 1) {
+      filter->state = c == '[' ? 2 : 0;
+    } else {
+      if (c >= 0x40 && c <= 0x7e) { filter->state = 0; }
+    }
+  }
+  fflush(stdout);
+}
+
+struct boot_milestone {
+  const char *needle;
+  const char *label;
+  bool seen;
+  double at;
+};
+
+static void report_milestones(struct boot_milestone *milestones, size_t count, const char *buf, double start) {
+  for (size_t i = 0; i < count; ++i) {
+    if (!milestones[i].seen && contains(buf, milestones[i].needle)) {
+      milestones[i].seen = true;
+      milestones[i].at = now_seconds() - start;
+    }
+  }
+}
+
+static void print_timing_summary(const struct boot_milestone *milestones, size_t count, double first_output_at) {
+  fputs("\n[host] boot timings:\n", stderr);
+  if (first_output_at >= 0.0) { fprintf(stderr, "[host]   +%.3fs first qemu output\n", first_output_at); }
+  for (size_t i = 0; i < count; ++i) {
+    if (milestones[i].seen) { fprintf(stderr, "[host]   +%.3fs %s\n", milestones[i].at, milestones[i].label); }
+  }
 }
 
 static void append(char *buf, size_t *len, const char *data, size_t n) {
@@ -153,7 +295,7 @@ static void print_filtered(const char *buf) {
   if (!printed) { fputs(buf, stdout); }
 }
 
-static int run_harness(char **qemu_argv, const char *mode) {
+static int run_harness(char **qemu_argv, const char *mode, bool timings) {
   int in_pipe[2];
   int out_pipe[2];
   if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) {
@@ -184,13 +326,31 @@ static int run_harness(char **qemu_argv, const char *mode) {
   size_t len = 0;
   size_t sent = 0;
   bool stdin_sent = false;
-  double deadline = now_seconds() + (strcmp(mode, "shell") == 0 ? 75.0 : 30.0);
+  bool plain = strcmp(mode, "plain") == 0;
+  bool interactive = plain;
+  double start = now_seconds();
+  double deadline = plain ? 0.0 : start + (strcmp(mode, "shell") == 0 ? 75.0 : 30.0);
+  bool first_output = false;
+  double first_output_at = -1.0;
+  bool timing_summary_printed = false;
+  struct csi_filter csi = {0};
+  struct boot_milestone milestones[] = {
+    {"UEFI firmware", "edk2 first banner", false, 0.0},
+    {"BdsDxe: starting", "edk2 starts boot option", false, 0.0},
+    {"spore-boot: loading", "spore bootloader starts", false, 0.0},
+    {"spore-boot: exited boot services", "exit boot services", false, 0.0},
+    {"[kernel] booted", "kernel first log", false, 0.0},
+    {"[kernel] entering EL0", "enter EL0", false, 0.0},
+    {"/ $ ", "shell prompt", false, 0.0},
+  };
+  if (timings) { fprintf(stderr, "[host] qemu launched; timing summary prints at shell prompt\n"); }
   for (;;) {
     int status = 0;
     if (waitpid(pid, &status, WNOHANG) == pid) {
       char chunk[4096];
       ssize_t n;
       while ((n = read(out_pipe[0], chunk, sizeof(chunk))) > 0) {
+        if (plain || strcmp(mode, "shell") == 0) { write_sanitized(&csi, chunk, (size_t)n); }
         append(buf, &len, chunk, (size_t)n);
       }
       if (strcmp(mode, "filter") == 0 || strcmp(mode, "stdin") == 0) {
@@ -200,7 +360,7 @@ static int run_harness(char **qemu_argv, const char *mode) {
       }
       return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
     }
-    if (now_seconds() > deadline) {
+    if (!plain && now_seconds() > deadline) {
       kill(pid, SIGTERM);
       waitpid(pid, NULL, 0);
       return 124;
@@ -208,16 +368,34 @@ static int run_harness(char **qemu_argv, const char *mode) {
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(out_pipe[0], &rfds);
+    if (interactive) { FD_SET(STDIN_FILENO, &rfds); }
+    int max_fd = out_pipe[0] > STDIN_FILENO ? out_pipe[0] : STDIN_FILENO;
     struct timeval tv = {.tv_sec = 0, .tv_usec = 50000};
-    if (select(out_pipe[0] + 1, &rfds, NULL, NULL, &tv) > 0 && FD_ISSET(out_pipe[0], &rfds)) {
+    if (select(max_fd + 1, &rfds, NULL, NULL, &tv) > 0) {
+      if (interactive && FD_ISSET(STDIN_FILENO, &rfds)) {
+        char input[1024];
+        ssize_t n = read(STDIN_FILENO, input, sizeof(input));
+        if (n > 0) { (void)write(in_pipe[1], input, (size_t)n); }
+      }
+      if (!FD_ISSET(out_pipe[0], &rfds)) { continue; }
       char chunk[1024];
       ssize_t n = read(out_pipe[0], chunk, sizeof(chunk));
       if (n > 0) {
-        if (strcmp(mode, "shell") == 0) {
-          fwrite(chunk, 1, (size_t)n, stdout);
-          fflush(stdout);
+        if (plain || strcmp(mode, "shell") == 0) {
+          write_sanitized(&csi, chunk, (size_t)n);
+        }
+        if (timings && !first_output) {
+          first_output = true;
+          first_output_at = now_seconds() - start;
         }
         append(buf, &len, chunk, (size_t)n);
+        if (timings) {
+          report_milestones(milestones, sizeof(milestones) / sizeof(milestones[0]), buf, start);
+          if (!timing_summary_printed && milestones[sizeof(milestones) / sizeof(milestones[0]) - 1].seen) {
+            timing_summary_printed = true;
+            print_timing_summary(milestones, sizeof(milestones) / sizeof(milestones[0]), first_output_at);
+          }
+        }
         if (strcmp(mode, "stdin") == 0 && !stdin_sent &&
             contains(buf, "[spore] stdin demo: child blocking on read(0)")) {
           write(in_pipe[1], "z\n", 2);
@@ -241,9 +419,13 @@ int main(int argc, char **argv) {
   const char *qemu = "qemu-system-aarch64";
   const char *accel = "hvf";
   const char *cpu = "host";
+  const char *vars = NULL;
+  bool timings = false;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
       mode = argv[++i];
+    } else if (strcmp(argv[i], "--timings") == 0) {
+      timings = true;
     } else if (strcmp(argv[i], "--image") == 0 && i + 1 < argc) {
       image = argv[++i];
     } else if (strcmp(argv[i], "--qemu") == 0 && i + 1 < argc) {
@@ -252,19 +434,24 @@ int main(int argc, char **argv) {
       accel = argv[++i];
     } else if (strcmp(argv[i], "--cpu") == 0 && i + 1 < argc) {
       cpu = argv[++i];
+    } else if (strcmp(argv[i], "--vars") == 0 && i + 1 < argc) {
+      vars = argv[++i];
     } else {
       usage();
     }
   }
   if (image == NULL) { usage(); }
-  char drive_arg[PATH_CAP];
+  char firmware_arg[PATH_CAP];
+  char vars_arg[PATH_CAP];
+  char image_drive_arg[PATH_CAP];
   char *qemu_argv[64];
   int qemu_argc = 0;
-  build_qemu_args(qemu_argv, &qemu_argc, qemu, image, accel, cpu, drive_arg, sizeof(drive_arg));
+  build_qemu_args(qemu_argv, &qemu_argc, qemu, image, accel, cpu, vars, firmware_arg, sizeof(firmware_arg), vars_arg,
+                  sizeof(vars_arg), image_drive_arg, sizeof(image_drive_arg));
   (void)qemu_argc;
-  if (strcmp(mode, "plain") == 0) { return run_plain(qemu_argv); }
-  if (strcmp(mode, "filter") == 0 || strcmp(mode, "shell") == 0 || strcmp(mode, "stdin") == 0) {
-    return run_harness(qemu_argv, mode);
+  if (strcmp(mode, "plain") == 0 || strcmp(mode, "filter") == 0 || strcmp(mode, "shell") == 0 ||
+      strcmp(mode, "stdin") == 0) {
+    return run_harness(qemu_argv, mode, timings);
   }
   usage();
   return 2;

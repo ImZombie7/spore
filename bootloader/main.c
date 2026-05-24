@@ -83,6 +83,15 @@ static void uefi_puts(const CHAR16 *s) {
   st->con_out->output_string(st->con_out, (CHAR16 *)s);
 }
 
+static void set_boot_timeout_zero(void) {
+  if (st->runtime_services == NULL || st->runtime_services->set_variable == NULL) { return; }
+  UINT16 timeout = 0;
+  (void)st->runtime_services->set_variable(u"Timeout", (EFI_GUID *)&EFI_GLOBAL_VARIABLE_GUID,
+                                           EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                                             EFI_VARIABLE_RUNTIME_ACCESS,
+                                           sizeof(timeout), &timeout);
+}
+
 static void uart_putc(char c) {
   volatile uint32_t *uart = (volatile uint32_t *)(uintptr_t)PL011_PHYS;
   volatile uint32_t *fr = (volatile uint32_t *)(uintptr_t)(PL011_PHYS + 0x18);
@@ -475,6 +484,7 @@ typedef void (*kernel_entry_t)(const struct spore_boot_info *);
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *system_table) {
   st = system_table;
   bs = system_table->boot_services;
+  set_boot_timeout_zero();
   uefi_puts(u"spore-boot: loading\r\n");
 
   if (current_el() != 1) {

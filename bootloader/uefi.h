@@ -23,6 +23,9 @@ typedef uint16_t UINT16;
 #define EFI_FILE_MODE_READ 0x0000000000000001ull
 #define EFI_ALLOCATE_ANY_PAGES 0
 #define EFI_LOADER_DATA 2
+#define EFI_VARIABLE_NON_VOLATILE 0x00000001u
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS 0x00000002u
+#define EFI_VARIABLE_RUNTIME_ACCESS 0x00000004u
 
 #define EFI_ERROR(status) (((status) & 0x8000000000000000ull) != 0)
 
@@ -49,6 +52,7 @@ struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
 
 typedef struct EFI_BOOT_SERVICES EFI_BOOT_SERVICES;
 typedef struct EFI_SYSTEM_TABLE EFI_SYSTEM_TABLE;
+typedef struct EFI_RUNTIME_SERVICES EFI_RUNTIME_SERVICES;
 
 typedef struct {
   uint32_t type;
@@ -90,6 +94,20 @@ struct EFI_BOOT_SERVICES {
   EFI_STATUS (*exit_boot_services)(EFI_HANDLE image_handle, UINTN map_key);
 };
 
+struct EFI_RUNTIME_SERVICES {
+  EFI_TABLE_HEADER hdr;
+  void *get_time;
+  void *set_time;
+  void *get_wakeup_time;
+  void *set_wakeup_time;
+  void *set_virtual_address_map;
+  void *convert_pointer;
+  void *get_variable;
+  void *get_next_variable_name;
+  EFI_STATUS (*set_variable)(CHAR16 *variable_name, EFI_GUID *vendor_guid, UINT32 attributes, UINTN data_size,
+                             void *data);
+};
+
 struct EFI_SYSTEM_TABLE {
   EFI_TABLE_HEADER hdr;
   CHAR16 *firmware_vendor;
@@ -100,7 +118,7 @@ struct EFI_SYSTEM_TABLE {
   EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *con_out;
   EFI_HANDLE standard_error_handle;
   EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *std_err;
-  void *runtime_services;
+  EFI_RUNTIME_SERVICES *runtime_services;
   EFI_BOOT_SERVICES *boot_services;
 };
 
@@ -158,3 +176,6 @@ static const EFI_GUID EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID = {
 
 static const EFI_GUID EFI_FILE_INFO_GUID = {
   0x09576e92, 0x6d3f, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
+
+static const EFI_GUID EFI_GLOBAL_VARIABLE_GUID = {
+  0x8be4df61, 0x93ca, 0x11d2, {0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c}};

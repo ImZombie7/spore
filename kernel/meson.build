@@ -58,10 +58,10 @@ kernel_elf = executable('kernel.elf',
   link_depends: files('linker.ld'),
   install: false)
 
-iso_root = meson.current_build_dir() / 'iso_root'
-image_iso = meson.project_build_root() / 'image.iso'
-test_iso_root = meson.current_build_dir() / 'test_iso_root'
-test_image_iso = meson.project_build_root() / 'test_image.iso'
+image_root = meson.current_build_dir() / 'image_root'
+image_img = meson.project_build_root() / 'image.img'
+test_image_root = meson.current_build_dir() / 'test_image_root'
+test_image_img = meson.project_build_root() / 'test_image.img'
 
 boot_efi = custom_target('BOOTAA64.EFI',
   input: files('../bootloader/main.c'),
@@ -84,45 +84,43 @@ boot_efi = custom_target('BOOTAA64.EFI',
   ],
   build_by_default: true)
 
-image = custom_target('image.iso',
+image = custom_target('image.img',
   input: [
     kernel_elf,
     files('../userland/image.manifest'),
     boot_efi,
   ],
-  output: 'image.iso',
+  output: 'image.img',
   command: [
     spore_image,
     meson.project_source_root(),
-    iso_root,
+    image_root,
     kernel_elf,
     boot_efi,
-    image_iso,
+    image_img,
     '@OUTPUT@',
     files('../userland/image.manifest'),
     meson.project_build_root(),
   ],
   depends: userland_image_targets,
-  build_always_stale: true,
   build_by_default: true)
 
-test_image = custom_target('test_image.iso',
+test_image = custom_target('test_image.img',
   input: [
     kernel_elf,
     files('../userland/tests/integration/image.manifest'),
     boot_efi,
   ],
-  output: 'test_image.iso',
+  output: 'test_image.img',
   command: [
     spore_image,
     meson.project_source_root(),
-    test_iso_root,
+    test_image_root,
     kernel_elf,
     boot_efi,
-    test_image_iso,
+    test_image_img,
     '@OUTPUT@',
     files('../userland/tests/integration/image.manifest'),
     meson.project_build_root(),
   ],
-  depends: userland_test_targets,
-  build_always_stale: true)
+  depends: userland_test_targets)

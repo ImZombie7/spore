@@ -182,7 +182,7 @@ static void mcopy_into(const char *efi_img, const char *src, const char *dst) {
 
 int main(int argc, char **argv) {
   if (argc != 7 && argc != 8 && argc != 9) {
-    fputs("usage: spore-image SOURCE_ROOT ISO_ROOT KERNEL_ELF BOOT_EFI OUTPUT_ISO OUTPUT_COPY [MANIFEST] "
+    fputs("usage: spore-image SOURCE_ROOT ISO_ROOT KERNEL_ELF BOOT_EFI OUTPUT_IMAGE OUTPUT_COPY [MANIFEST] "
           "[PREBUILT_ROOT]\n",
           stderr);
     return 2;
@@ -191,7 +191,7 @@ int main(int argc, char **argv) {
   const char *iso_root = argv[2];
   const char *kernel_elf = argv[3];
   const char *boot_efi = argv[4];
-  const char *output_iso = argv[5];
+  const char *output_image = argv[5];
   const char *output_copy = argv[6];
   char default_manifest[MAX_PATH];
   snprintf(default_manifest, sizeof(default_manifest), "%s/userland/image.manifest", source_root);
@@ -241,31 +241,22 @@ int main(int argc, char **argv) {
   fclose(mf);
   fclose(mods);
 
-  char efi_img[MAX_PATH];
-  path_join(efi_img, sizeof(efi_img), iso_root, "efi.img");
   char of_arg[MAX_PATH + 4];
-  snprintf(of_arg, sizeof(of_arg), "of=%s", efi_img);
+  snprintf(of_arg, sizeof(of_arg), "of=%s", output_image);
   char *const dd_argv[] = {"dd", "if=/dev/zero", of_arg, "bs=1M", "count=64", NULL};
   run_argv(dd_argv, true);
-  char *const mkfs_argv[] = {"mkfs.fat", "-F", "32", efi_img, NULL};
+  char *const mkfs_argv[] = {"mkfs.fat", "-F", "32", (char *)output_image, NULL};
   run_argv(mkfs_argv, true);
-  char *const mmd_argv[] = {"mmd", "-i", efi_img, "::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/modules", NULL};
+  char *const mmd_argv[] = {"mmd", "-i", (char *)output_image, "::/EFI", "::/EFI/BOOT", "::/boot", "::/boot/modules", NULL};
   run_argv(mmd_argv, false);
-  mcopy_into(efi_img, boot_efi, "/EFI/BOOT/BOOTAA64.EFI");
-  mcopy_into(efi_img, kernel_elf, "/boot/kernel.elf");
-  mcopy_into(efi_img, modules_txt, "/boot/modules.txt");
+  mcopy_into(output_image, boot_efi, "/EFI/BOOT/BOOTAA64.EFI");
+  mcopy_into(output_image, kernel_elf, "/boot/kernel.elf");
+  mcopy_into(output_image, modules_txt, "/boot/modules.txt");
 
   char cmd[MAX_PATH * 3];
   snprintf(cmd, sizeof(cmd), "for f in '%s'/*; do mcopy -i '%s' \"$f\" ::/boot/modules/$(basename \"$f\") || exit 1; done",
-           modules_dir, efi_img);
+           modules_dir, output_image);
   if (system(cmd) != 0) { die_msg("copy modules failed"); }
-
-  char *const xorriso_argv[] = {
-    "xorriso", "-as", "mkisofs", "-R", "-r", "-J", "-hfsplus", "-apm-block-size", "2048",
-    "--efi-boot", "efi.img", "-no-emul-boot", "-efi-boot-part", "--efi-boot-image",
-    "--protective-msdos-label", (char *)iso_root, "-o", (char *)output_iso, NULL,
-  };
-  run_argv(xorriso_argv, true);
-  copy_file(output_iso, output_copy);
+  copy_file(output_image, output_copy);
   return 0;
 }

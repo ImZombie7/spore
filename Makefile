@@ -3,6 +3,7 @@ MESON ?= meson
 CLANG_FORMAT ?= clang-format
 QEMU_RUNNER ?= $(BUILD_DIR)/tools/spore-run
 QEMU ?= qemu-system-aarch64
+EDK2_VARS ?= $(BUILD_DIR)/edk2-vars.fd
 
 .PHONY: setup build image test-image runner test run run-tests run-shell-check format clean
 
@@ -13,10 +14,10 @@ build: setup
 	$(MESON) compile -C "$(BUILD_DIR)"
 
 image: setup
-	$(MESON) compile -C "$(BUILD_DIR)" image.iso
+	$(MESON) compile -C "$(BUILD_DIR)" image.img
 
 test-image: setup
-	$(MESON) compile -C "$(BUILD_DIR)" test_image.iso
+	$(MESON) compile -C "$(BUILD_DIR)" test_image.img
 
 runner: setup
 	$(MESON) compile -C "$(BUILD_DIR)" spore-run
@@ -25,13 +26,13 @@ test: build
 	$(MESON) test -C "$(BUILD_DIR)"
 
 run: image runner
-	$(QEMU_RUNNER) --mode plain --image "$(BUILD_DIR)/image.iso" --qemu "$(QEMU)"
+	$(QEMU_RUNNER) --mode plain --timings --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/image.img" --qemu "$(QEMU)"
 
 run-tests: test-image runner
-	$(QEMU_RUNNER) --mode filter --image "$(BUILD_DIR)/test_image.iso"
+	$(QEMU_RUNNER) --mode filter --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/test_image.img"
 
 run-shell-check: image runner
-	$(QEMU_RUNNER) --mode shell --image "$(BUILD_DIR)/image.iso"
+	$(QEMU_RUNNER) --mode shell --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/image.img"
 
 format:
 	find bootloader kernel tests userland -type f \( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' -o -name '*.hpp' \) -print0 | xargs -0 $(CLANG_FORMAT) -i
