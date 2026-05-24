@@ -186,12 +186,9 @@ static void compile_or_copy_userland(const char *source_root, const char *source
 
     char *argv[48];
     int argc = 0;
-    argv[argc++] = "zig";
-    argv[argc++] = "cc";
-    argv[argc++] = "-target";
-    argv[argc++] = "aarch64-linux-musl";
+    argv[argc++] = "aarch64-unknown-linux-musl-gcc";
     bool static_binary = strcmp(source, "userland/bin/init") == 0;
-    argv[argc++] = static_binary ? "-static" : "-dynamic";
+    if (static_binary) { argv[argc++] = "-static"; }
     argv[argc++] = "-std=c23";
     argv[argc++] = "-D_GNU_SOURCE";
     argv[argc++] = "-s";
@@ -211,15 +208,11 @@ static void compile_or_copy_userland(const char *source_root, const char *source
   } else {
     bool static_binary = strcmp(source, "userland/bin/init") == 0;
     char *const argv[] = {
-      "zig",
-      "cc",
-      "-target",
-      "aarch64-linux-musl",
-      static_binary ? "-static" : "-dynamic",
+      "aarch64-unknown-linux-musl-gcc",
+      static_binary ? "-static" : "-Wl,-dynamic-linker,/lib/ld-musl-aarch64.so.1",
       "-std=c23",
       "-D_GNU_SOURCE",
       "-s",
-      "-Wl,-dynamic-linker,/lib/ld-musl-aarch64.so.1",
       "-Wl,-rpath,/lib",
       src,
       "-o",
@@ -254,21 +247,32 @@ static void copy_into_rootfs(const char *src, const char *rootfs, const char *ds
 }
 
 static void install_musl_runtime(const char *source_root, const char *rootfs) {
+  (void)source_root;
   char lib_dir[MAX_PATH];
   path_join(lib_dir, sizeof(lib_dir), rootfs, "lib");
   ensure_dir(lib_dir);
 
-  char src[MAX_PATH];
-  snprintf(src, sizeof(src), "%s/third_party/musl-aarch64/ld-musl-aarch64.so.1", source_root);
+  char ld_src[MAX_PATH];
+  char libc_src[MAX_PATH];
+  FILE *ld_pipe = popen("aarch64-unknown-linux-musl-gcc -print-file-name=ld-musl-aarch64.so.1", "r");
+  if (ld_pipe == NULL || fgets(ld_src, sizeof(ld_src), ld_pipe) == NULL || pclose(ld_pipe) != 0) {
+    die_msg("failed to locate ld-musl-aarch64.so.1");
+  }
+  FILE *libc_pipe = popen("aarch64-unknown-linux-musl-gcc -print-file-name=libc.so", "r");
+  if (libc_pipe == NULL || fgets(libc_src, sizeof(libc_src), libc_pipe) == NULL || pclose(libc_pipe) != 0) {
+    die_msg("failed to locate libc.so");
+  }
+  ld_src[strcspn(ld_src, "\r\n")] = '\0';
+  libc_src[strcspn(libc_src, "\r\n")] = '\0';
 
   char ld_dst[MAX_PATH];
   path_join(ld_dst, sizeof(ld_dst), lib_dir, "ld-musl-aarch64.so.1");
-  copy_file(src, ld_dst);
+  copy_file(ld_src, ld_dst);
   chmod(ld_dst, 0755);
 
   char libc_dst[MAX_PATH];
   path_join(libc_dst, sizeof(libc_dst), lib_dir, "libc.so");
-  copy_file(src, libc_dst);
+  copy_file(libc_src, libc_dst);
   chmod(libc_dst, 0755);
 }
 
