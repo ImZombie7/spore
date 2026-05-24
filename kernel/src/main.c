@@ -10,6 +10,7 @@
 #include "mm/vmm.h"
 #include "pl011.h"
 #include "ramfs.h"
+#include "virtio_console.h"
 #include "virtio_net.h"
 
 #include <stdarg.h>
@@ -20,7 +21,11 @@
 static const struct spore_boot_info *boot;
 
 void kputc(char c) {
-  pl011_putc(c);
+  if (virtio_console_ready()) {
+    virtio_console_putc(c);
+  } else {
+    pl011_putc(c);
+  }
 }
 
 void kputs(const char *s) {
@@ -265,14 +270,14 @@ void kernel_main(const struct spore_boot_info *boot_info) {
   map_device_pages();
   pl011_init(boot->hhdm_offset);
 
-  kprintf("[kernel] booted at EL%u\n", (unsigned)current_el());
-
   const struct spore_memmap_entry *memmap =
     (const struct spore_memmap_entry *)(uintptr_t)(boot->hhdm_offset + boot->memmap_phys);
   const struct spore_boot_module *modules =
     (const struct spore_boot_module *)(uintptr_t)(boot->hhdm_offset + boot->modules_phys);
 
   pmm_init(boot->hhdm_offset, memmap, boot->memmap_count);
+  (void)virtio_console_init(boot->hhdm_offset);
+  kprintf("[kernel] booted at EL%u\n", (unsigned)current_el());
   exceptions_init();
   timer_init(boot->hhdm_offset);
   if (virtio_net_init(boot->hhdm_offset)) { (void)virtio_net_smoke_tx(); }

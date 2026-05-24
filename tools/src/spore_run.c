@@ -14,6 +14,7 @@
 enum {
   BUF_CAP = 262144,
   PATH_CAP = 1024,
+  STARTUP_SERIAL_CAP = 32768,
 };
 
 static const char *shell_commands[] = {
@@ -32,7 +33,7 @@ static const char *shell_commands[] = {
   "confine fs:/tmp /demos/writer /tmp/d/out\n",
   "confine mem:1 /demos/memhog\n",
   "runc bad-manifest /demos/escalate\n",
-  "exit\n",
+  "shutdown\n",
 };
 
 static void usage(void) {
@@ -40,10 +41,6 @@ static void usage(void) {
         "[--qemu QEMU] [--accel ACCEL] [--cpu CPU] [--vars VARS_FD]\n",
         stderr);
   exit(2);
-}
-
-static bool starts_with(const char *s, const char *prefix) {
-  return strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
 static bool contains(const char *haystack, const char *needle) {
@@ -223,7 +220,8 @@ static int finish_harness(int status, bool raw_terminal, const struct termios *s
 
 static void build_qemu_args(char **argv, int *argc, const char *qemu, const char *image, const char *accel,
                             const char *cpu, const char *vars, char *firmware_arg, size_t firmware_cap, char *vars_arg,
-                            size_t vars_cap, char *image_drive_arg, size_t image_drive_cap) {
+                            size_t vars_cap, char *image_drive_arg, size_t image_drive_cap, int log_fd,
+                            char *log_chardev_arg, size_t log_chardev_cap) {
   char firmware[PATH_CAP];
   if (!find_firmware(qemu, firmware, sizeof(firmware))) {
     fputs("spore-run: edk2-aarch64-code.fd not found\n", stderr);
@@ -233,6 +231,7 @@ static void build_qemu_args(char **argv, int *argc, const char *qemu, const char
   snprintf(firmware_arg, firmware_cap, "if=pflash,format=raw,readonly=on,file=%s", firmware);
   if (vars != NULL) { snprintf(vars_arg, vars_cap, "if=pflash,format=raw,file=%s", vars); }
   snprintf(image_drive_arg, image_drive_cap, "if=none,format=raw,readonly=on,file=%s,id=sporeesp", image);
+  snprintf(log_chardev_arg, log_chardev_cap, "file,id=sporelog,path=/dev/fd/%d", log_fd);
   int i = 0;
   argv[i++] = (char *)qemu;
   argv[i++] = "-M";
@@ -249,6 +248,12 @@ static void build_qemu_args(char **argv, int *argc, const char *qemu, const char
   argv[i++] = "user,id=sporenet";
   argv[i++] = "-device";
   argv[i++] = "virtio-net-device,netdev=sporenet,mac=52:54:00:12:34:56";
+  argv[i++] = "-chardev";
+  argv[i++] = log_chardev_arg;
+  argv[i++] = "-device";
+  argv[i++] = "virtio-serial-device";
+  argv[i++] = "-device";
+  argv[i++] = "virtconsole,chardev=sporelog,name=spore.log";
   argv[i++] = "-boot";
   argv[i++] = "order=d,menu=off,strict=on";
   argv[i++] = "-drive";
@@ -284,6 +289,12 @@ struct csi_filter {
   int state;
 };
 
+struct startup_serial {
+  char buf[STARTUP_SERIAL_CAP];
+  size_t len;
+  bool done;
+};
+
 static void write_sanitized_to(struct csi_filter *filter, const char *data, size_t len, FILE *out) {
   for (size_t i = 0; i < len; ++i) {
     unsigned char c = (unsigned char)data[i];
@@ -302,98 +313,66 @@ static void write_sanitized_to(struct csi_filter *filter, const char *data, size
   fflush(out);
 }
 
-struct output_router {
-  struct csi_filter csi;
-  FILE *log;
-  bool split_logs;
-  bool passthrough_line;
-  char line[4096];
-  size_t len;
-};
-
-static const char *const log_prefixes[] = {
-  "[spore]",    "[kernel]",     "[host]", "spore-boot:", "UEFI firmware",
-  "ArmTrngLib", "Error: Image", "Tpm2",   "BdsDxe:",     "ConvertPages:",
-};
-
-static bool is_log_line(const char *line) {
-  while (*line == '\r') {
-    ++line;
+static void startup_append(struct startup_serial *startup, const char *chunk, size_t n) {
+  if (n > sizeof(startup->buf) - startup->len) {
+    size_t keep = sizeof(startup->buf) / 2;
+    if (startup->len > keep) {
+      memmove(startup->buf, startup->buf + startup->len - keep, keep);
+      startup->len = keep;
+    }
+    if (n > sizeof(startup->buf) - startup->len) {
+      chunk += n - (sizeof(startup->buf) - startup->len);
+      n = sizeof(startup->buf) - startup->len;
+    }
   }
-  for (size_t i = 0; i < sizeof(log_prefixes) / sizeof(log_prefixes[0]); ++i) {
-    if (starts_with(line, log_prefixes[i])) { return true; }
-  }
-  return false;
+  memcpy(startup->buf + startup->len, chunk, n);
+  startup->len += n;
 }
 
-static bool could_be_log_line(const char *line) {
-  while (*line == '\r') {
-    ++line;
+static ssize_t find_shell_prompt(const char *data, size_t len) {
+  for (size_t i = 0; i + 3 <= len; ++i) {
+    if (data[i] == ' ' && data[i + 1] == '$' && data[i + 2] == ' ') {
+      size_t start = i;
+      while (start > 0 && data[start - 1] != '\n' && data[start - 1] != '\r') {
+        --start;
+      }
+      return (ssize_t)start;
+    }
   }
-  size_t len = strlen(line);
-  if (len == 0) { return true; }
-  for (size_t i = 0; i < sizeof(log_prefixes) / sizeof(log_prefixes[0]); ++i) {
-    if (strncmp(log_prefixes[i], line, len) == 0) { return true; }
-  }
-  return false;
+  return -1;
 }
 
-static void router_emit_line(struct output_router *router, bool newline) {
-  router->line[router->len] = '\0';
-  FILE *out = router->split_logs && is_log_line(router->line) ? router->log : stdout;
-  fwrite(router->line, 1, router->len, out);
-  if (newline) { fputc('\n', out); }
-  fflush(out);
-  router->len = 0;
-  router->line[0] = '\0';
-  if (newline) { router->passthrough_line = false; }
+static ssize_t find_after_last_marker(const char *data, size_t len, const char *marker) {
+  size_t marker_len = strlen(marker);
+  ssize_t found = -1;
+  if (marker_len == 0 || len < marker_len) { return -1; }
+  for (size_t i = 0; i + marker_len <= len; ++i) {
+    if (memcmp(data + i, marker, marker_len) == 0) { found = (ssize_t)(i + marker_len); }
+  }
+  return found;
 }
 
-static void router_write(struct output_router *router, const char *data, size_t len) {
-  if (!router->split_logs) {
-    write_sanitized_to(&router->csi, data, len, stdout);
+static void write_serial_output(struct csi_filter *serial_csi, const char *chunk, size_t n, bool tmux_log_pane,
+                                struct startup_serial *startup, FILE *log_stream) {
+  if (!tmux_log_pane || startup->done) {
+    write_sanitized_to(serial_csi, chunk, n, stdout);
     return;
   }
 
-  for (size_t i = 0; i < len; ++i) {
-    unsigned char c = (unsigned char)data[i];
-    if (router->csi.state == 0) {
-      if (c == 0x1b) {
-        router->csi.state = 1;
-        continue;
-      }
-    } else if (router->csi.state == 1) {
-      router->csi.state = c == '[' ? 2 : 0;
-      continue;
-    } else {
-      if (c >= 0x40 && c <= 0x7e) { router->csi.state = 0; }
-      continue;
-    }
+  startup_append(startup, chunk, n);
+  ssize_t prompt_at = find_shell_prompt(startup->buf, startup->len);
+  if (prompt_at < 0) { return; }
 
-    if (router->passthrough_line) {
-      fwrite(&c, 1, 1, stdout);
-      fflush(stdout);
-      if (c == '\n') { router->passthrough_line = false; }
-      continue;
-    }
-
-    if (c == '\n') {
-      router_emit_line(router, true);
-      continue;
-    }
-
-    if (router->len + 1 >= sizeof(router->line)) { router_emit_line(router, false); }
-    router->line[router->len++] = (char)c;
-    router->line[router->len] = '\0';
-
-    if (contains(router->line, " $ ") || !could_be_log_line(router->line)) {
-      fwrite(router->line, 1, router->len, stdout);
-      fflush(stdout);
-      router->len = 0;
-      router->line[0] = '\0';
-      router->passthrough_line = true;
-    }
+  ssize_t handoff_at = find_after_last_marker(startup->buf, startup->len, "spore-boot: exited boot services");
+  if (handoff_at < 0) { handoff_at = prompt_at; }
+  while ((size_t)handoff_at < startup->len && (startup->buf[handoff_at] == '\r' || startup->buf[handoff_at] == '\n')) {
+    ++handoff_at;
   }
+
+  if (handoff_at > 0) { write_sanitized_to(serial_csi, startup->buf, (size_t)handoff_at, log_stream); }
+  write_sanitized_to(serial_csi, startup->buf + handoff_at, startup->len - (size_t)handoff_at, stdout);
+  startup->done = true;
+  startup->len = 0;
 }
 
 struct boot_milestone {
@@ -456,10 +435,27 @@ static void print_filtered(const char *buf) {
   if (!printed) { fputs(buf, stdout); }
 }
 
-static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tmux_log_pane) {
+static void record_output(char *buf, size_t *len, const char *chunk, size_t n, struct boot_milestone *milestones,
+                          size_t milestone_count, bool timings, double start, bool *first_output,
+                          double *first_output_at, bool *timing_summary_printed, FILE *log_stream) {
+  if (timings && !*first_output) {
+    *first_output = true;
+    *first_output_at = now_seconds() - start;
+  }
+  append(buf, len, chunk, n);
+  if (timings) {
+    report_milestones(milestones, milestone_count, buf, start);
+    if (!*timing_summary_printed && milestones[milestone_count - 1].seen) {
+      *timing_summary_printed = true;
+      print_timing_summary(log_stream, milestones, milestone_count, *first_output_at);
+    }
+  }
+}
+
+static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tmux_log_pane, int log_pipe[2]) {
   int in_pipe[2];
-  int out_pipe[2];
-  if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) {
+  int serial_pipe[2];
+  if (pipe(in_pipe) != 0 || pipe(serial_pipe) != 0) {
     perror("pipe");
     return 1;
   }
@@ -470,18 +466,20 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
   }
   if (pid == 0) {
     dup2(in_pipe[0], STDIN_FILENO);
-    dup2(out_pipe[1], STDOUT_FILENO);
-    dup2(out_pipe[1], STDERR_FILENO);
+    dup2(serial_pipe[1], STDOUT_FILENO);
+    dup2(serial_pipe[1], STDERR_FILENO);
     close(in_pipe[0]);
     close(in_pipe[1]);
-    close(out_pipe[0]);
-    close(out_pipe[1]);
+    close(serial_pipe[0]);
+    close(serial_pipe[1]);
+    close(log_pipe[0]);
     execvp(qemu_argv[0], qemu_argv);
     perror(qemu_argv[0]);
     _exit(127);
   }
   close(in_pipe[0]);
-  close(out_pipe[1]);
+  close(serial_pipe[1]);
+  close(log_pipe[1]);
 
   char buf[BUF_CAP] = {0};
   size_t len = 0;
@@ -496,16 +494,11 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
   bool first_output = false;
   double first_output_at = -1.0;
   bool timing_summary_printed = false;
+  struct startup_serial startup_serial = {0};
   char tmux_pane_id[64] = {0};
   FILE *log_stream = tmux_log_pane ? open_tmux_log_pane(tmux_pane_id, sizeof(tmux_pane_id)) : stderr;
-  struct output_router router = {
-    .csi = {0},
-    .log = log_stream,
-    .split_logs = tmux_log_pane,
-    .passthrough_line = false,
-    .line = {0},
-    .len = 0,
-  };
+  struct csi_filter serial_csi = {0};
+  struct csi_filter log_csi = {0};
   struct boot_milestone milestones[] = {
     {"UEFI firmware", "edk2 first banner", false, 0.0},
     {"BdsDxe: starting", "edk2 starts boot option", false, 0.0},
@@ -524,8 +517,17 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
     if (waitpid(pid, &status, WNOHANG) == pid) {
       char chunk[4096];
       ssize_t n;
-      while ((n = read(out_pipe[0], chunk, sizeof(chunk))) > 0) {
-        if (plain || strcmp(mode, "shell") == 0) { router_write(&router, chunk, (size_t)n); }
+      while ((n = read(serial_pipe[0], chunk, sizeof(chunk))) > 0) {
+        if (plain || strcmp(mode, "shell") == 0) {
+          write_serial_output(&serial_csi, chunk, (size_t)n, tmux_log_pane, &startup_serial, log_stream);
+        }
+        append(buf, &len, chunk, (size_t)n);
+      }
+      while ((n = read(log_pipe[0], chunk, sizeof(chunk))) > 0) {
+        if (plain || strcmp(mode, "shell") == 0) {
+          FILE *out = tmux_log_pane ? log_stream : stdout;
+          write_sanitized_to(&log_csi, chunk, (size_t)n, out);
+        }
         append(buf, &len, chunk, (size_t)n);
       }
       if (strcmp(mode, "filter") == 0 || strcmp(mode, "stdin") == 0) {
@@ -533,7 +535,6 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
       } else if (!plain && strcmp(mode, "shell") != 0) {
         fputs(buf, stdout);
       }
-      if (router.split_logs && router.len > 0) { router_emit_line(&router, false); }
       int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
       return finish_harness(rc, raw_terminal, &saved_termios, tmux_log_pane ? log_stream : NULL, tmux_pane_id);
     }
@@ -544,9 +545,11 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
     }
     fd_set rfds;
     FD_ZERO(&rfds);
-    FD_SET(out_pipe[0], &rfds);
+    FD_SET(serial_pipe[0], &rfds);
+    FD_SET(log_pipe[0], &rfds);
     if (interactive) { FD_SET(STDIN_FILENO, &rfds); }
-    int max_fd = out_pipe[0] > STDIN_FILENO ? out_pipe[0] : STDIN_FILENO;
+    int max_fd = serial_pipe[0] > log_pipe[0] ? serial_pipe[0] : log_pipe[0];
+    if (interactive && STDIN_FILENO > max_fd) { max_fd = STDIN_FILENO; }
     struct timeval tv = {.tv_sec = 0, .tv_usec = 50000};
     if (select(max_fd + 1, &rfds, NULL, NULL, &tv) > 0) {
       if (interactive && FD_ISSET(STDIN_FILENO, &rfds)) {
@@ -554,23 +557,29 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
         ssize_t n = read(STDIN_FILENO, input, sizeof(input));
         if (n > 0) { (void)write(in_pipe[1], input, (size_t)n); }
       }
-      if (!FD_ISSET(out_pipe[0], &rfds)) { continue; }
       char chunk[1024];
-      ssize_t n = read(out_pipe[0], chunk, sizeof(chunk));
-      if (n > 0) {
-        if (timings && !first_output) {
-          first_output = true;
-          first_output_at = now_seconds() - start;
-        }
-        append(buf, &len, chunk, (size_t)n);
-        if (timings) {
-          report_milestones(milestones, sizeof(milestones) / sizeof(milestones[0]), buf, start);
-          if (!timing_summary_printed && milestones[sizeof(milestones) / sizeof(milestones[0]) - 1].seen) {
-            timing_summary_printed = true;
-            print_timing_summary(log_stream, milestones, sizeof(milestones) / sizeof(milestones[0]), first_output_at);
+      if (FD_ISSET(serial_pipe[0], &rfds)) {
+        ssize_t n = read(serial_pipe[0], chunk, sizeof(chunk));
+        if (n > 0) {
+          record_output(buf, &len, chunk, (size_t)n, milestones, sizeof(milestones) / sizeof(milestones[0]), timings,
+                        start, &first_output, &first_output_at, &timing_summary_printed, log_stream);
+          if (plain || strcmp(mode, "shell") == 0) {
+            write_serial_output(&serial_csi, chunk, (size_t)n, tmux_log_pane, &startup_serial, log_stream);
           }
         }
-        if (plain || strcmp(mode, "shell") == 0) { router_write(&router, chunk, (size_t)n); }
+      }
+      if (FD_ISSET(log_pipe[0], &rfds)) {
+        ssize_t n = read(log_pipe[0], chunk, sizeof(chunk));
+        if (n > 0) {
+          record_output(buf, &len, chunk, (size_t)n, milestones, sizeof(milestones) / sizeof(milestones[0]), timings,
+                        start, &first_output, &first_output_at, &timing_summary_printed, log_stream);
+          if (plain || strcmp(mode, "shell") == 0) {
+            FILE *out = tmux_log_pane ? log_stream : stdout;
+            write_sanitized_to(&log_csi, chunk, (size_t)n, out);
+          }
+        }
+      }
+      if (len > 0) {
         if (strcmp(mode, "stdin") == 0 && !stdin_sent &&
             contains(buf, "[spore] stdin demo: child blocking on read(0)")) {
           write(in_pipe[1], "z\n", 2);
@@ -622,14 +631,21 @@ int main(int argc, char **argv) {
   char firmware_arg[PATH_CAP];
   char vars_arg[PATH_CAP];
   char image_drive_arg[PATH_CAP];
-  char *qemu_argv[64];
+  char log_chardev_arg[PATH_CAP];
+  int log_pipe[2];
+  if (pipe(log_pipe) != 0) {
+    perror("pipe");
+    return 1;
+  }
+  char *qemu_argv[80];
   int qemu_argc = 0;
   build_qemu_args(qemu_argv, &qemu_argc, qemu, image, accel, cpu, vars, firmware_arg, sizeof(firmware_arg), vars_arg,
-                  sizeof(vars_arg), image_drive_arg, sizeof(image_drive_arg));
+                  sizeof(vars_arg), image_drive_arg, sizeof(image_drive_arg), log_pipe[1], log_chardev_arg,
+                  sizeof(log_chardev_arg));
   (void)qemu_argc;
   if (strcmp(mode, "plain") == 0 || strcmp(mode, "filter") == 0 || strcmp(mode, "shell") == 0 ||
       strcmp(mode, "stdin") == 0) {
-    return run_harness(qemu_argv, mode, timings, tmux_log_pane);
+    return run_harness(qemu_argv, mode, timings, tmux_log_pane, log_pipe);
   }
   usage();
   return 2;

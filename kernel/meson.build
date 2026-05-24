@@ -38,6 +38,7 @@ kernel_sources = files(
   'src/cell.c',
   'src/main.c',
   'src/drivers/pl011.c',
+  'src/drivers/virtio_console.c',
   'src/drivers/virtio_net.c',
   'src/elf/loader.c',
   'src/exec/stack.c',

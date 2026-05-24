@@ -14,7 +14,9 @@ userland_test_targets = []
 
 subdir('lib/spore')
 
+subdir('bin/init')
 subdir('bin/sh')
+subdir('bin/shutdown')
 subdir('bin/ls')
 subdir('bin/cat')
 subdir('bin/echo')

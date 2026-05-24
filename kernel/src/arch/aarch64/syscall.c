@@ -90,6 +90,7 @@ enum {
   SYS_SPORE_RESIDENT = 0x4003,
   SYS_SPORE_SET_BUDGET = 0x4004,
   SYS_SPORE_APPLY_POLICY = 0x4005,
+  SYS_SPORE_SHUTDOWN = 0x4006,
   MAP_PRIVATE = 0x02,
   MAP_FIXED = 0x10,
   MAP_ANONYMOUS = 0x20,
@@ -775,6 +776,18 @@ static int64_t zero_user(uint64_t addr, uint64_t len) {
   return 0;
 }
 
+static void system_poweroff(void) {
+  __asm__ volatile("mov x0, #0x0008\n"
+                   "movk x0, #0x8400, lsl #16\n"
+                   "hvc #0\n"
+                   :
+                   :
+                   : "x0", "memory");
+  for (;;) {
+    __asm__ volatile("wfe");
+  }
+}
+
 static int64_t dispatch(struct trap_frame *f) {
   uint64_t nr = f->x[8];
   uint64_t a0 = f->x[0];
@@ -854,6 +867,10 @@ static int64_t dispatch(struct trap_frame *f) {
     int rc = cell_apply_policy(manifest);
     return rc == 0 ? 0 : -(int64_t)EPERM;
   }
+  case SYS_SPORE_SHUTDOWN:
+    kprintf("[kernel] shutdown\n");
+    system_poweroff();
+    return 0;
   case SYS_BRK:
     return sys_brk(a0);
   case SYS_MMAP:
