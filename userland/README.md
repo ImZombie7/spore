@@ -40,7 +40,7 @@ contract is to print a result.
 1. Create `userland/demos/<name>/main.c`.
 2. Add a `manifest` file describing the policy fixture.
 3. Add `userland/demos/<name> /demos/<name>` to `userland/image.manifest`.
-4. Update `tools/run_qemu.py`'s shell mode if the demo is part of the policy gate.
+4. Update `tools/src/spore_run.c`'s shell mode if the demo is part of the policy gate.
 
 ## Regression Image
 

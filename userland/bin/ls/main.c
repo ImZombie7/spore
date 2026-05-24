@@ -25,11 +25,21 @@ int main(int argc, char **argv) {
     perror("ls");
     return SPORE_ERROR;
   }
-  char buf[512];
+  char buf[512] = {0};
   long n = syscall(SYS_getdents64, fd, buf, sizeof(buf));
+  if (n < 0) {
+    perror("ls");
+    close(fd);
+    return SPORE_ERROR;
+  }
   int first = 1;
   for (long off = 0; off < n;) {
     struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + off);
+    if (d->d_reclen == 0 || off + d->d_reclen > n) {
+      close(fd);
+      spore_eprintf("ls: bad directory entry\n");
+      return SPORE_ERROR;
+    }
     printf("%s%s", first ? "" : "  ", d->d_name);
     first = 0;
     off += d->d_reclen;

@@ -88,12 +88,11 @@ image = custom_target('image.iso',
   input: [
     kernel_elf,
     files('../userland/image.manifest'),
-    files('../tools/build_image.py'),
     boot_efi,
   ],
   output: 'image.iso',
   command: [
-    files('../tools/build_image.py'),
+    spore_image,
     meson.project_source_root(),
     iso_root,
     kernel_elf,
@@ -111,12 +110,11 @@ test_image = custom_target('test_image.iso',
   input: [
     kernel_elf,
     files('../userland/tests/integration/image.manifest'),
-    files('../tools/build_image.py'),
     boot_efi,
   ],
   output: 'test_image.iso',
   command: [
-    files('../tools/build_image.py'),
+    spore_image,
     meson.project_source_root(),
     test_iso_root,
     kernel_elf,
@@ -128,54 +126,3 @@ test_image = custom_target('test_image.iso',
   ],
   depends: userland_test_targets,
   build_always_stale: true)
-
-qemu_code = run_command('sh', '-c',
-  'for dir in $(qemu-system-aarch64 -L help 2>/dev/null); do ' +
-  '  for file in "$dir/edk2-aarch64-code.fd" "${dir%-firmware}/qemu/edk2-aarch64-code.fd"; do ' +
-  '    if [ -f "$file" ]; then printf "%s" "$file"; exit 0; fi; ' +
-  '  done; ' +
-  'done; ' +
-  'if [ -f /opt/homebrew/opt/qemu/share/qemu/edk2-aarch64-code.fd ]; then ' +
-  '  printf "%s" /opt/homebrew/opt/qemu/share/qemu/edk2-aarch64-code.fd; exit 0; ' +
-  'fi; ' +
-  'exit 1',
-  check: true).stdout().strip()
-
-qemu_base_args = [
-  'qemu-system-aarch64',
-  '-M', 'virt,gic-version=3',
-  '-accel', 'hvf',
-  '-cpu', 'host',
-  '-m', '512M',
-  '-global', 'virtio-mmio.force-legacy=false',
-  '-netdev', 'user,id=sporenet',
-  '-device', 'virtio-net-device,netdev=sporenet,mac=52:54:00:12:34:56',
-  '-boot', 'order=d,menu=off,strict=on',
-  '-drive', 'if=pflash,format=raw,readonly=on,file=' + qemu_code,
-]
-
-qemu_args = qemu_base_args + [
-  '-cdrom', image_iso,
-  '-serial', 'stdio',
-  '-display', 'none',
-]
-
-test_qemu_args = qemu_base_args + [
-  '-cdrom', test_image_iso,
-  '-serial', 'stdio',
-  '-display', 'none',
-]
-
-run_target('run',
-  command: [
-    files('../tools/run_qemu.py'),
-    '--mode', 'plain',
-  ] + qemu_args,
-  depends: image)
-
-run_target('run-tests',
-  command: [
-    files('../tools/run_qemu.py'),
-    '--mode', 'filter',
-  ] + test_qemu_args,
-  depends: test_image)

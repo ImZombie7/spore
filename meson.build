@@ -8,5 +8,6 @@ project('spore', 'c',
   ])
 
 subdir('userland')
+subdir('tools')
 subdir('kernel')
 subdir('tests')
