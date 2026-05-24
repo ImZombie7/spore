@@ -129,6 +129,7 @@ enum {
   DT_DIR = 4,
   AF_INET = 2,
   SOCK_DGRAM = 2,
+  IPPROTO_ICMP = 1,
   IPPROTO_UDP = 17,
   EROFS = 30,
   ENOENT = 2,
@@ -713,8 +714,10 @@ static bool copy_sockaddr_in(uint64_t addr, uint64_t len, struct sockaddr_in64 *
 
 static int64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol) {
   if (domain != AF_INET) { return -(int64_t)EAFNOSUPPORT; }
-  if ((type & 0xf) != SOCK_DGRAM || (protocol != 0 && protocol != IPPROTO_UDP)) { return -(int64_t)EPROTONOSUPPORT; }
-  return cell_fd_socket_udp();
+  if ((type & 0xf) != SOCK_DGRAM) { return -(int64_t)EPROTONOSUPPORT; }
+  if (protocol == 0) { protocol = IPPROTO_UDP; }
+  if (protocol != IPPROTO_UDP && protocol != IPPROTO_ICMP) { return -(int64_t)EPROTONOSUPPORT; }
+  return cell_fd_socket_inet((uint8_t)protocol);
 }
 
 static int64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t len) {
@@ -744,12 +747,14 @@ static int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len, uint64_t flag
   return cell_fd_udp_send((int)fd, ip, port, buf, len);
 }
 
-static int64_t sys_recvfrom(uint64_t fd, uint64_t buf, uint64_t len, uint64_t flags, uint64_t addr, uint64_t addrlen) {
+static int64_t sys_recvfrom(struct trap_frame *frame, uint64_t fd, uint64_t buf, uint64_t len, uint64_t flags,
+                            uint64_t addr, uint64_t addrlen) {
   (void)flags;
   (void)addr;
   (void)addrlen;
   if (!user_writable(buf, len)) { return -(int64_t)EFAULT; }
-  return cell_fd_udp_recv((int)fd, buf, len);
+  int64_t rc = cell_fd_socket_recv((int)fd, buf, len, frame);
+  return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
 }
 
 static int64_t sys_getsockname(uint64_t fd, uint64_t addr, uint64_t addrlen) {
@@ -892,7 +897,7 @@ static int64_t dispatch(struct trap_frame *f) {
   case SYS_SENDTO:
     return sys_sendto(a0, a1, a2, a3, a4, f->x[5]);
   case SYS_RECVFROM:
-    return sys_recvfrom(a0, a1, a2, a3, a4, f->x[5]);
+    return sys_recvfrom(f, a0, a1, a2, a3, a4, f->x[5]);
   case SYS_GETSOCKNAME:
     return sys_getsockname(a0, a1, a2);
   case SYS_SETSOCKOPT:

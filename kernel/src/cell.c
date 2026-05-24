@@ -3,6 +3,7 @@
 #include "kprintf.h"
 #include "mem.h"
 #include "mm/pmm.h"
+#include "net.h"
 #include "pl011.h"
 
 static struct domain domains[MAX_DOMAINS];
@@ -22,11 +23,13 @@ enum {
   CAP_ENFORCE = 1u << 0,
   CAP_EGRESS_ENFORCE = 1u << 1,
   IPPROTO_UDP = 17,
+  IPPROTO_ICMP = 1,
   EPERM = 1,
   EMSGSIZE = 90,
   EAGAIN = 11,
   EFAULT = 14,
   EINVAL = 22,
+  EIO = 5,
   ROBUST_LIST_LIMIT = 16,
   FUTEX_OWNER_DIED = 0x40000000u,
 };
@@ -808,6 +811,7 @@ int cell_set_budget(int domain_id, uint64_t ticks) {
 }
 
 void cell_timer_tick(struct trap_frame *frame, bool from_lower_el) {
+  net_poll();
   struct domain *domain = current_domain();
   if (domain == NULL) { return; }
   if (domain->budget.max_ticks != 0 && domain->budget.remaining_ticks != 0) {
@@ -965,7 +969,7 @@ int cell_fd_open_node(const struct ramfs_node *node, uint32_t flags) {
   return fd;
 }
 
-int cell_fd_socket_udp(void) {
+int cell_fd_socket_inet(uint8_t proto) {
   struct domain *domain = current_domain();
   if (domain == NULL) { return -12; }
   int fd = -1;
@@ -979,6 +983,7 @@ int cell_fd_socket_udp(void) {
   struct open_file *file = alloc_open_file();
   if (file == NULL) { return -12; }
   file->type = OPEN_SOCKET;
+  file->socket_proto = proto;
   file->udp_local_port = (uint16_t)(40000 + fd);
   domain->fds[fd] = file;
   return fd;
@@ -1017,30 +1022,100 @@ int64_t cell_fd_udp_send(int fd, uint32_t ip, uint16_t port, uint64_t buf, uint6
     effective_ip = file->udp_remote_ip;
     effective_port = file->udp_remote_port;
   }
-  if (effective_ip == 0 || effective_port == 0) { return -EINVAL; }
-  if (!cell_egress_allowed(IPPROTO_UDP, effective_ip, effective_port)) { return -EPERM; }
+  if (effective_ip == 0 || (file->socket_proto == IPPROTO_UDP && effective_port == 0)) { return -EINVAL; }
+  if (file->socket_proto == IPPROTO_UDP && !cell_egress_allowed(IPPROTO_UDP, effective_ip, effective_port)) {
+    return -EPERM;
+  }
   if (!file->udp_connected) {
     file->udp_remote_ip = effective_ip;
     file->udp_remote_port = effective_port;
     file->udp_connected = true;
   }
-  if (len > sizeof(file->udp_rx)) { return -EMSGSIZE; }
-  if (!vmm_copy_from_user(&domain->as, file->udp_rx, buf, (size_t)len)) { return -EFAULT; }
-  file->udp_rx_len = len;
-  kprintf("[spore] udp send fd=%d dst=%x:%u len=%u\n", fd, (unsigned)effective_ip, (unsigned)effective_port,
-          (unsigned)len);
+  uint8_t tmp[1472];
+  if (len > sizeof(tmp)) { return -EMSGSIZE; }
+  if (!vmm_copy_from_user(&domain->as, tmp, buf, (size_t)len)) { return -EFAULT; }
+  bool sent = false;
+  if (file->socket_proto == IPPROTO_UDP) {
+    sent = net_udp_send(file->udp_local_port, effective_ip, effective_port, tmp, (size_t)len);
+  } else if (file->socket_proto == IPPROTO_ICMP) {
+    sent = net_icmp_send_echo(effective_ip, tmp, (size_t)len);
+  }
+  if (!sent) { return -EIO; }
+  kprintf("[spore] socket send fd=%d proto=%u dst=%x:%u len=%u\n", fd, (unsigned)file->socket_proto,
+          (unsigned)effective_ip, (unsigned)effective_port, (unsigned)len);
   return (int64_t)len;
 }
 
-int64_t cell_fd_udp_recv(int fd, uint64_t buf, uint64_t len) {
+int64_t cell_fd_socket_recv(int fd, uint64_t buf, uint64_t len, struct trap_frame *frame) {
   struct domain *domain = current_domain();
   struct open_file *file = udp_socket_for_fd(domain, fd);
   if (file == NULL) { return -9; }
-  if (file->udp_rx_len == 0) { return -EAGAIN; }
+  net_poll();
+  if (file->udp_rx_len == 0) {
+    if (frame == NULL) { return -EAGAIN; }
+    cell_save_current(frame);
+    current_thread->state = THREAD_BLOCKED;
+    current_thread->wait_reason = WAIT_SOCKET;
+    current_thread->wait_target = fd;
+    cell_schedule(frame);
+    return CELL_SWITCHED;
+  }
   uint64_t n = file->udp_rx_len < len ? file->udp_rx_len : len;
   if (!vmm_copy_to_user(&domain->as, buf, file->udp_rx, (size_t)n)) { return -EFAULT; }
   file->udp_rx_len = 0;
   return (int64_t)n;
+}
+
+static bool socket_matches_udp(struct open_file *file, uint32_t src_ip, uint16_t src_port, uint16_t dst_port) {
+  return file != NULL && file->type == OPEN_SOCKET && file->socket_proto == IPPROTO_UDP &&
+         file->udp_local_port == dst_port &&
+         (!file->udp_connected || (file->udp_remote_ip == src_ip && file->udp_remote_port == src_port));
+}
+
+static void wake_socket_waiters(struct open_file *file) {
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    struct thread *thread = &threads[i];
+    if (thread->state != THREAD_BLOCKED || thread->wait_reason != WAIT_SOCKET || thread->domain == NULL) { continue; }
+    int fd = thread->wait_target;
+    if (fd >= 0 && fd < MAX_FDS && thread->domain->fds[fd] == file) {
+      thread->state = THREAD_RUNNABLE;
+      thread->wait_reason = WAIT_NONE;
+      thread->wait_target = -1;
+    }
+  }
+}
+
+void cell_net_deliver_udp(uint32_t src_ip, uint16_t src_port, uint16_t dst_port, const void *payload, size_t len) {
+  for (size_t d = 0; d < MAX_DOMAINS; ++d) {
+    if (!domains[d].used) { continue; }
+    for (size_t fd = 0; fd < MAX_FDS; ++fd) {
+      struct open_file *file = domains[d].fds[fd];
+      if (!socket_matches_udp(file, src_ip, src_port, dst_port)) { continue; }
+      if (len > sizeof(file->udp_rx)) { len = sizeof(file->udp_rx); }
+      kmemcpy(file->udp_rx, payload, len);
+      file->udp_rx_len = len;
+      file->udp_rx_ip = src_ip;
+      file->udp_rx_port = src_port;
+      wake_socket_waiters(file);
+      return;
+    }
+  }
+}
+
+void cell_net_deliver_icmp(uint32_t src_ip, const void *payload, size_t len) {
+  for (size_t d = 0; d < MAX_DOMAINS; ++d) {
+    if (!domains[d].used) { continue; }
+    for (size_t fd = 0; fd < MAX_FDS; ++fd) {
+      struct open_file *file = domains[d].fds[fd];
+      if (file == NULL || file->type != OPEN_SOCKET || file->socket_proto != IPPROTO_ICMP) { continue; }
+      if (len > sizeof(file->udp_rx)) { len = sizeof(file->udp_rx); }
+      kmemcpy(file->udp_rx, payload, len);
+      file->udp_rx_len = len;
+      file->udp_rx_ip = src_ip;
+      wake_socket_waiters(file);
+      return;
+    }
+  }
 }
 
 int cell_fd_dup(int oldfd, int minfd) {

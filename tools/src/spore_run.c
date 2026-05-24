@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -27,6 +29,7 @@ static const char *shell_commands[] = {
   "mkdir /tmp/d && cd /tmp/d && touch x && ls\n",
   "/bin/hello\n",
   "pthread-demo\n",
+  "ping 10.0.2.2\n",
   "udp-echo 10.0.2.2 5555 hi\n",
   "confine net:none udp-send 10.0.2.2 5555 hi\n",
   "confine net:udp:10.0.2.2:5555 udp-send 10.0.2.2 5555 hi\n",
@@ -218,6 +221,28 @@ static int finish_harness(int status, bool raw_terminal, const struct termios *s
   restore_terminal(raw_terminal, saved_termios);
   close_tmux_log_pane(log_stream, tmux_pane_id);
   return status;
+}
+
+static pid_t start_udp_echo_server(void) {
+  pid_t pid = fork();
+  if (pid != 0) { return pid; }
+  int fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0) { _exit(1); }
+  int one = 1;
+  (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons(5555);
+  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) { _exit(1); }
+  for (;;) {
+    char buf[2048];
+    struct sockaddr_in peer;
+    socklen_t peer_len = sizeof(peer);
+    ssize_t n = recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr *)&peer, &peer_len);
+    if (n > 0) { (void)sendto(fd, buf, (size_t)n, 0, (struct sockaddr *)&peer, peer_len); }
+  }
 }
 
 static void build_qemu_args(char **argv, int *argc, const char *qemu, const char *image, const char *accel,
@@ -482,6 +507,7 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
   close(in_pipe[0]);
   close(serial_pipe[1]);
   close(log_pipe[1]);
+  pid_t echo_pid = start_udp_echo_server();
 
   char buf[BUF_CAP] = {0};
   size_t len = 0;
@@ -538,11 +564,19 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
         fputs(buf, stdout);
       }
       int rc = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+      if (echo_pid > 0) {
+        (void)kill(echo_pid, SIGTERM);
+        (void)waitpid(echo_pid, NULL, 0);
+      }
       return finish_harness(rc, raw_terminal, &saved_termios, tmux_log_pane ? log_stream : NULL, tmux_pane_id);
     }
     if (!plain && now_seconds() > deadline) {
       kill(pid, SIGTERM);
       waitpid(pid, NULL, 0);
+      if (echo_pid > 0) {
+        (void)kill(echo_pid, SIGTERM);
+        (void)waitpid(echo_pid, NULL, 0);
+      }
       return finish_harness(124, raw_terminal, &saved_termios, tmux_log_pane ? log_stream : NULL, tmux_pane_id);
     }
     fd_set rfds;

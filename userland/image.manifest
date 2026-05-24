@@ -14,6 +14,7 @@ userland/bin/hello /bin/hello
 userland/bin/true /bin/true
 userland/bin/false /bin/false
 userland/bin/pthread-demo /bin/pthread-demo
+userland/bin/ping /bin/ping
 userland/bin/udp-echo /bin/udp-echo
 userland/bin/udp-send /bin/udp-send
 userland/bin/udp-recv /bin/udp-recv

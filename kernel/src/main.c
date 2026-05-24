@@ -8,6 +8,7 @@
 #include "mem.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "net.h"
 #include "pl011.h"
 #include "ramfs.h"
 #include "virtio_console.h"
@@ -280,7 +281,10 @@ void kernel_main(const struct spore_boot_info *boot_info) {
   kprintf("[kernel] booted at EL%u\n", (unsigned)current_el());
   exceptions_init();
   timer_init(boot->hhdm_offset);
-  if (virtio_net_init(boot->hhdm_offset)) { (void)virtio_net_smoke_tx(); }
+  if (virtio_net_init(boot->hhdm_offset)) {
+    net_init();
+    (void)virtio_net_smoke_tx();
+  }
   cell_system_init(boot->hhdm_offset);
 
   struct ramfs_file init;
