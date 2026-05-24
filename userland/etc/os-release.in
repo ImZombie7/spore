@@ -1,0 +1,5 @@
+NAME=Spore
+PRETTY_NAME="Spore @SPORE_RELEASE@"
+ID=spore
+VERSION_ID=@SPORE_RELEASE@
+HOME_URL="https://spore.local"

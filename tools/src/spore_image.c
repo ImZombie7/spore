@@ -130,6 +130,10 @@ static void module_name(char *out, size_t cap, const char *target) {
 static bool prebuilt_path(char *out, size_t cap, const char *prebuilt_root, const char *source_root,
                           const char *source) {
   if (prebuilt_root == NULL || prebuilt_root[0] == '\0') { return false; }
+  int exact = snprintf(out, cap, "%s/%s", prebuilt_root, source);
+  if (exact < 0 || (size_t)exact >= cap) { die_msg("path too long"); }
+  if (exists(out) && !is_dir(out)) { return true; }
+
   char src[MAX_PATH];
   path_join(src, sizeof(src), source_root, source);
   char name[MAX_PATH];
@@ -245,7 +249,8 @@ static void copy_into_rootfs(const char *src, const char *rootfs, const char *ds
     ensure_dir(parent);
   }
   copy_file(src, out);
-  chmod(out, 0755);
+  bool executable = strcmp(dst, "/init") == 0 || strncmp(dst, "/bin/", 5) == 0 || strncmp(dst, "/demos/", 7) == 0;
+  chmod(out, executable ? 0755 : 0644);
 }
 
 static void symlink_into_rootfs(const char *target, const char *rootfs, const char *dst) {
@@ -294,13 +299,6 @@ static void install_musl_runtime(const char *source_root, const char *rootfs) {
   chmod(libc_dst, 0755);
 }
 
-static void write_text_file(const char *path, const char *text) {
-  FILE *f = fopen(path, "wb");
-  if (f == NULL) { die(path); }
-  if (fwrite(text, 1, strlen(text), f) != strlen(text)) { die("fwrite"); }
-  fclose(f);
-}
-
 static void build_root_ext2(const char *rootfs_dir, const char *output_root, const char *output_copy) {
   char dev_dir[MAX_PATH];
   char etc_dir[MAX_PATH];
@@ -314,29 +312,6 @@ static void build_root_ext2(const char *rootfs_dir, const char *output_root, con
   ensure_dir(etc_dir);
   ensure_dir(proc_dir);
   ensure_dir(tmp_dir);
-
-  char motd[MAX_PATH];
-  path_join(motd, sizeof(motd), etc_dir, "motd");
-  if (!exists(motd)) { write_text_file(motd, "welcome to spore\n"); }
-
-  char passwd[MAX_PATH];
-  path_join(passwd, sizeof(passwd), etc_dir, "passwd");
-  if (!exists(passwd)) { write_text_file(passwd, "root:x:0:0:root:/root:/bin/msh\n"); }
-
-  char group[MAX_PATH];
-  path_join(group, sizeof(group), etc_dir, "group");
-  if (!exists(group)) { write_text_file(group, "root:x:0:\n"); }
-
-  char os_release[MAX_PATH];
-  path_join(os_release, sizeof(os_release), etc_dir, "os-release");
-  if (!exists(os_release)) {
-    write_text_file(os_release,
-                    "NAME=Spore\n"
-                    "PRETTY_NAME=\"Spore 0.4.0\"\n"
-                    "ID=spore\n"
-                    "VERSION_ID=0.4.0\n"
-                    "HOME_URL=\"https://spore.local\"\n");
-  }
 
   char *const mkfs_argv[] = {
     "mke2fs", "-q", "-t", "ext2", "-b", "4096", "-d", (char *)rootfs_dir, (char *)output_root, "131072", NULL,

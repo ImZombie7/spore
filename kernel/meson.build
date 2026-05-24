@@ -131,6 +131,7 @@ test_image = custom_target('test_image.img',
   input: [
     kernel_elf,
     files('../userland/tests/integration/image.manifest'),
+    userland_image_data,
     boot_efi,
   ],
   output: ['test_image.img', 'test_root.ext2'],

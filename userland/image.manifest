@@ -79,5 +79,9 @@ userland/demos/escalate /demos/escalate
 userland/demos/signal-crash /demos/signal-crash
 
 userland/bin/fastfetch /bin/fastfetch
+userland/etc/motd /etc/motd
+userland/etc/passwd /etc/passwd
+userland/etc/group /etc/group
+userland/etc/os-release /etc/os-release
 userland/etc/fastfetch/config.jsonc /etc/fastfetch/config.jsonc
 userland/etc/fastfetch/spore.logo /etc/fastfetch/spore.logo
