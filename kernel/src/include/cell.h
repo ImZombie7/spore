@@ -156,6 +156,7 @@ bool cell_exec_replace(struct user_address_space *as, struct vma_list *vmas, uin
                        struct trap_frame *frame);
 int64_t cell_fd_write(int fd, uint64_t buf, uint64_t len);
 int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len, struct trap_frame *frame);
+int64_t cell_fd_pread_kernel(int fd, uint64_t off, void *buf, uint64_t len);
 int64_t cell_fd_lseek(int fd, int64_t off, int whence);
 int cell_fd_open_node(const struct vfs_node *node, uint32_t flags);
 int cell_fd_socket_inet(uint8_t proto);

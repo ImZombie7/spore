@@ -981,6 +981,14 @@ int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len, struct trap_frame *fram
   return (int64_t)done;
 }
 
+int64_t cell_fd_pread_kernel(int fd, uint64_t off, void *buf, uint64_t len) {
+  struct domain *domain = current_domain();
+  if (domain == NULL || fd < 0 || fd >= MAX_FDS || domain->fds[fd] == NULL) { return -9; }
+  struct open_file *file = domain->fds[fd];
+  if (file->type != OPEN_RAMFS || file->node.is_dir || file->node.device != RAMFS_DEV_NONE) { return -22; }
+  return (int64_t)vfs_read(&file->node, off, buf, len);
+}
+
 void cell_wake_stdin(void) {
   for (size_t i = 0; i < MAX_THREADS; ++i) {
     struct thread *thread = &threads[i];

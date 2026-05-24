@@ -190,9 +190,15 @@ static void compile_or_copy_userland(const char *source_root, const char *source
     argv[argc++] = "cc";
     argv[argc++] = "-target";
     argv[argc++] = "aarch64-linux-musl";
-    argv[argc++] = "-static";
+    bool static_binary = strcmp(source, "userland/bin/init") == 0;
+    argv[argc++] = static_binary ? "-static" : "-dynamic";
     argv[argc++] = "-std=c23";
     argv[argc++] = "-D_GNU_SOURCE";
+    argv[argc++] = "-s";
+    if (!static_binary) {
+      argv[argc++] = "-Wl,-dynamic-linker,/lib/ld-musl-aarch64.so.1";
+      argv[argc++] = "-Wl,-rpath,/lib";
+    }
     argv[argc++] = include;
     for (size_t i = 0; i < source_count; ++i) {
       argv[argc++] = source_files[i];
@@ -203,9 +209,22 @@ static void compile_or_copy_userland(const char *source_root, const char *source
     argv[argc] = NULL;
     run_argv(argv, false);
   } else {
+    bool static_binary = strcmp(source, "userland/bin/init") == 0;
     char *const argv[] = {
-      "zig",           "cc", "-target", "aarch64-linux-musl", "-static", "-std=c23",
-      "-D_GNU_SOURCE", src,  "-o",      (char *)out,          NULL,
+      "zig",
+      "cc",
+      "-target",
+      "aarch64-linux-musl",
+      static_binary ? "-static" : "-dynamic",
+      "-std=c23",
+      "-D_GNU_SOURCE",
+      "-s",
+      "-Wl,-dynamic-linker,/lib/ld-musl-aarch64.so.1",
+      "-Wl,-rpath,/lib",
+      src,
+      "-o",
+      (char *)out,
+      NULL,
     };
     run_argv(argv, false);
   }
@@ -234,6 +253,25 @@ static void copy_into_rootfs(const char *src, const char *rootfs, const char *ds
   chmod(out, 0755);
 }
 
+static void install_musl_runtime(const char *source_root, const char *rootfs) {
+  char lib_dir[MAX_PATH];
+  path_join(lib_dir, sizeof(lib_dir), rootfs, "lib");
+  ensure_dir(lib_dir);
+
+  char src[MAX_PATH];
+  snprintf(src, sizeof(src), "%s/third_party/musl-aarch64/ld-musl-aarch64.so.1", source_root);
+
+  char ld_dst[MAX_PATH];
+  path_join(ld_dst, sizeof(ld_dst), lib_dir, "ld-musl-aarch64.so.1");
+  copy_file(src, ld_dst);
+  chmod(ld_dst, 0755);
+
+  char libc_dst[MAX_PATH];
+  path_join(libc_dst, sizeof(libc_dst), lib_dir, "libc.so");
+  copy_file(src, libc_dst);
+  chmod(libc_dst, 0755);
+}
+
 static void write_text_file(const char *path, const char *text) {
   FILE *f = fopen(path, "wb");
   if (f == NULL) { die(path); }
@@ -257,7 +295,7 @@ static void build_root_ext2(const char *rootfs_dir, const char *output_root, con
   if (!exists(motd)) { write_text_file(motd, "welcome to spore\n"); }
 
   char *const mkfs_argv[] = {
-    "mke2fs", "-q", "-t", "ext2", "-b", "4096", "-d", (char *)rootfs_dir, (char *)output_root, "262144", NULL,
+    "mke2fs", "-q", "-t", "ext2", "-b", "4096", "-d", (char *)rootfs_dir, (char *)output_root, "131072", NULL,
   };
   unlink(output_root);
   run_argv(mkfs_argv, false);
@@ -332,12 +370,13 @@ int main(int argc, char **argv) {
   }
   fclose(mf);
   fclose(mods);
+  install_musl_runtime(source_root, rootfs_dir);
 
   char of_arg[MAX_PATH + 4];
   snprintf(of_arg, sizeof(of_arg), "of=%s", output_image);
-  char *const dd_argv[] = {"dd", "if=/dev/zero", of_arg, "bs=1M", "count=96", NULL};
+  char *const dd_argv[] = {"dd", "if=/dev/zero", of_arg, "bs=1M", "count=16", NULL};
   run_argv(dd_argv, true);
-  char *const mkfs_argv[] = {"mkfs.fat", "-F", "32", (char *)output_image, NULL};
+  char *const mkfs_argv[] = {"mkfs.fat", "-F", "16", (char *)output_image, NULL};
   run_argv(mkfs_argv, true);
   char *const mmd_argv[] = {"mmd",         "-i",      (char *)output_image, "::/EFI",
                             "::/EFI/BOOT", "::/boot", "::/boot/modules",    NULL};

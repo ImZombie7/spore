@@ -47,7 +47,16 @@ int main(int argc, char **argv) {
   struct ext2_node hello;
   assert(ext2_lookup(&fs, "/bin/hello", &hello));
   assert(ext2_is_regular(&hello));
-  assert(hello.size > 1024 * 1024);
+  assert(hello.size < 256 * 1024);
+
+  struct ext2_node loader;
+  assert(ext2_lookup(&fs, "/lib/ld-musl-aarch64.so.1", &loader));
+  assert(ext2_is_regular(&loader));
+  assert(loader.size > 512 * 1024);
+
+  struct ext2_node libc;
+  assert(ext2_lookup(&fs, "/lib/libc.so", &libc));
+  assert(ext2_is_regular(&libc));
 
   fclose(f);
   return 0;

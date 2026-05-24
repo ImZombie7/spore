@@ -153,6 +153,7 @@ enum {
 };
 
 #define SYSCALL_SWITCHED ((int64_t)CELL_SWITCHED)
+#define INTERP_LOAD_BASE 0x0000006000000000ull
 
 struct iovec64 {
   uint64_t base;
@@ -426,8 +427,34 @@ static int64_t sys_brk(uint64_t requested) {
   return (int64_t)requested;
 }
 
-static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags) {
-  if (len == 0 || (flags & (MAP_PRIVATE | MAP_ANONYMOUS)) != (MAP_PRIVATE | MAP_ANONYMOUS)) { return -(int64_t)EINVAL; }
+static int64_t map_file_private(uint64_t base, uint64_t len, uint64_t prot, int fd, uint64_t off) {
+  uint64_t end = align_up(base + len, PAGE_SIZE);
+  uint32_t final_flags = prot_to_vmm(prot);
+  uint32_t load_flags = final_flags | VMM_USER_WRITE;
+  uint8_t tmp[256];
+
+  for (uint64_t va = base; va < end; va += PAGE_SIZE) {
+    if (!vmm_alloc_page(active_as(), va, load_flags)) { return -(int64_t)ENOMEM; }
+  }
+
+  uint64_t done = 0;
+  while (done < len) {
+    uint64_t chunk = len - done;
+    if (chunk > sizeof(tmp)) { chunk = sizeof(tmp); }
+    int64_t got = cell_fd_pread_kernel(fd, off + done, tmp, chunk);
+    if (got < 0) { return got; }
+    if (got == 0) { break; }
+    if (!vmm_copy_to_user(active_as(), base + done, tmp, (size_t)got)) { return -(int64_t)EFAULT; }
+    done += (uint64_t)got;
+    if ((uint64_t)got < chunk) { break; }
+  }
+  vmm_protect_range(active_as(), base, end, final_flags);
+  return 0;
+}
+
+static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, uint64_t fd, uint64_t off) {
+  bool anon = (flags & MAP_ANONYMOUS) != 0;
+  if (len == 0 || (flags & MAP_PRIVATE) == 0 || (!anon && (int64_t)fd < 0)) { return -(int64_t)EINVAL; }
   uint64_t base = addr != 0 ? align_down(addr, PAGE_SIZE) : active_as()->mmap_base;
   uint64_t raw_end;
   if (!checked_add(base, len, &raw_end)) { return -(int64_t)EINVAL; }
@@ -436,6 +463,13 @@ static int64_t sys_mmap(uint64_t addr, uint64_t len, uint64_t prot, uint64_t fla
   if (!cell_mmap_allowed((end - base) / PAGE_SIZE)) { return -(int64_t)ENOMEM; }
   if ((flags & MAP_FIXED) != 0) { (void)cell_remove_vma(base, end); }
   if (!cell_add_vma(base, end, prot_to_vmm(prot), (uint32_t)flags)) { return -(int64_t)EINVAL; }
+  if (!anon) {
+    int64_t rc = map_file_private(base, len, prot, (int)fd, off);
+    if (rc < 0) {
+      (void)cell_remove_vma(base, end);
+      return rc;
+    }
+  }
   if (addr == 0) { active_as()->mmap_base = end; }
   return (int64_t)base;
 }
@@ -451,7 +485,13 @@ static int64_t sys_mprotect(uint64_t addr, uint64_t len, uint64_t prot) {
   if (len == 0) { return 0; }
   uint64_t start = align_down(addr, PAGE_SIZE);
   uint64_t end = align_up(addr + len, PAGE_SIZE);
-  return cell_protect_vma(start, end, prot_to_vmm(prot)) ? 0 : -(int64_t)EINVAL;
+  uint32_t vmm_prot = prot_to_vmm(prot);
+  if (cell_protect_vma(start, end, vmm_prot)) { return 0; }
+  for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+    if (!vmm_is_mapped(active_as(), va)) { return -(int64_t)EINVAL; }
+  }
+  vmm_protect_range(active_as(), start, end, vmm_prot);
+  return 0;
 }
 
 static int64_t sys_madvise(uint64_t addr, uint64_t len, uint64_t advice) {
@@ -467,7 +507,7 @@ static int64_t sys_mremap(uint64_t old_addr, uint64_t old_len, uint64_t new_len,
     return (int64_t)old_addr;
   }
   if ((flags & MREMAP_MAYMOVE) == 0) { return -(int64_t)EINVAL; }
-  return sys_mmap(0, new_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS);
+  return sys_mmap(0, new_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, (uint64_t)-1, 0);
 }
 
 static int64_t sys_getrandom(uint64_t buf, uint64_t len) {
@@ -556,6 +596,8 @@ static int64_t sys_execve(struct trap_frame *frame, uint64_t path_addr, uint64_t
   const void *file_data = NULL;
   uint64_t file_size = 0;
   if (!vfs_lookup_exec(path, &file_data, &file_size)) { return -(int64_t)ENOENT; }
+  char interp_path[128];
+  bool has_interp = elf_find_interp_aarch64(file_data, (size_t)file_size, interp_path, sizeof(interp_path));
 
   struct user_address_space new_as;
   struct loaded_elf elf;
@@ -564,13 +606,28 @@ static int64_t sys_execve(struct trap_frame *frame, uint64_t path_addr, uint64_t
   uint64_t hhdm_offset = active_as()->hhdm_offset;
   vma_list_init(&new_vmas);
   if (!vmm_user_init(&new_as, hhdm_offset)) { return -12; }
-  if (!elf_load_static_aarch64(&new_as, file_data, (size_t)file_size, &elf) ||
-      !build_initial_stack_args(&new_as, &elf, argv, argc, envp, envc, &user_sp)) {
+  if (!elf_load_aarch64(&new_as, file_data, (size_t)file_size, 0, &elf)) {
+    vmm_destroy(&new_as);
+    return -(int64_t)EINVAL;
+  }
+  if (has_interp) {
+    const void *interp_data = NULL;
+    uint64_t interp_size = 0;
+    struct loaded_elf interp;
+    if (!vfs_lookup_exec(interp_path, &interp_data, &interp_size) ||
+        !elf_load_aarch64(&new_as, interp_data, (size_t)interp_size, INTERP_LOAD_BASE, &interp)) {
+      vmm_destroy(&new_as);
+      return -(int64_t)ENOENT;
+    }
+    elf.runtime_entry = interp.entry;
+    elf.at_base = interp.load_base;
+  }
+  if (!build_initial_stack_args(&new_as, &elf, argv, argc, envp, envc, &user_sp)) {
     vmm_destroy(&new_as);
     return -(int64_t)EINVAL;
   }
   kprintf("[spore] execve %s\n", path);
-  return cell_exec_replace(&new_as, &new_vmas, elf.entry, user_sp, frame) ? 0 : -12;
+  return cell_exec_replace(&new_as, &new_vmas, elf.runtime_entry, user_sp, frame) ? 0 : -12;
 }
 
 static int64_t sys_openat(uint64_t dirfd, uint64_t path_addr, uint64_t flags) {
@@ -812,6 +869,7 @@ static int64_t dispatch(struct trap_frame *f) {
   uint64_t a2 = f->x[2];
   uint64_t a3 = f->x[3];
   uint64_t a4 = f->x[4];
+  uint64_t a5 = f->x[5];
 
   if (!cell_syscall_allowed(nr)) {
     kprintf("[spore] syscall denied nr=%d\n", (int)nr);
@@ -891,7 +949,7 @@ static int64_t dispatch(struct trap_frame *f) {
   case SYS_BRK:
     return sys_brk(a0);
   case SYS_MMAP:
-    return sys_mmap(a0, a1, a2, a3);
+    return sys_mmap(a0, a1, a2, a3, a4, a5);
   case SYS_MUNMAP:
     return sys_munmap(a0, a1);
   case SYS_MPROTECT:
@@ -907,9 +965,9 @@ static int64_t dispatch(struct trap_frame *f) {
   case SYS_CONNECT:
     return sys_connect(a0, a1, a2);
   case SYS_SENDTO:
-    return sys_sendto(a0, a1, a2, a3, a4, f->x[5]);
+    return sys_sendto(a0, a1, a2, a3, a4, a5);
   case SYS_RECVFROM:
-    return sys_recvfrom(f, a0, a1, a2, a3, a4, f->x[5]);
+    return sys_recvfrom(f, a0, a1, a2, a3, a4, a5);
   case SYS_GETSOCKNAME:
     return sys_getsockname(a0, a1, a2);
   case SYS_SETSOCKOPT:

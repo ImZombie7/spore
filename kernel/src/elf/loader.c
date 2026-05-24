@@ -8,6 +8,7 @@ enum {
   ET_EXEC = 2,
   ET_DYN = 3,
   EM_AARCH64 = 183,
+  PT_INTERP = 3,
   PT_LOAD = 1,
   PF_X = 1,
   PF_W = 2,
@@ -61,22 +62,56 @@ static uint32_t phdr_to_vmm_flags(uint32_t flags) {
   return out;
 }
 
-bool elf_load_static_aarch64(struct user_address_space *as, const void *image, size_t image_size,
-                             struct loaded_elf *out) {
+static void finalize_segment_permissions(struct user_address_space *as, uint64_t start, uint64_t end, uint32_t flags) {
+#if defined(__STDC_HOSTED__) && __STDC_HOSTED__
+  (void)as;
+  (void)start;
+  (void)end;
+  (void)flags;
+#else
+  vmm_protect_range(as, start, end, flags);
+#endif
+}
+
+static bool valid_ehdr(const struct elf64_ehdr *ehdr, size_t image_size) {
+  const unsigned char magic[4] = {0x7f, 'E', 'L', 'F'};
+  return image_size >= sizeof(*ehdr) && kmemcmp(ehdr->e_ident, magic, sizeof(magic)) == 0 && ehdr->e_ident[4] == 2 &&
+         ehdr->e_ident[5] == 1 && (ehdr->e_type == ET_EXEC || ehdr->e_type == ET_DYN) &&
+         ehdr->e_machine == EM_AARCH64 && ehdr->e_phentsize == sizeof(struct elf64_phdr) &&
+         bounds_ok(ehdr->e_phoff, (uint64_t)ehdr->e_phentsize * ehdr->e_phnum, image_size);
+}
+
+bool elf_find_interp_aarch64(const void *image, size_t image_size, char *out, size_t out_cap) {
+  if (out_cap == 0 || image_size < sizeof(struct elf64_ehdr)) { return false; }
+  const struct elf64_ehdr *ehdr = image;
+  if (!valid_ehdr(ehdr, image_size)) { return false; }
+
+  const struct elf64_phdr *phdrs = (const void *)((const uint8_t *)image + ehdr->e_phoff);
+  for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
+    const struct elf64_phdr *ph = &phdrs[i];
+    if (ph->p_type != PT_INTERP) { continue; }
+    if (ph->p_filesz == 0 || ph->p_filesz >= out_cap || !bounds_ok(ph->p_offset, ph->p_filesz, image_size)) {
+      return false;
+    }
+    const char *src = (const char *)image + ph->p_offset;
+    if (src[ph->p_filesz - 1] != '\0') { return false; }
+    kmemcpy(out, src, ph->p_filesz);
+    return true;
+  }
+  return false;
+}
+
+bool elf_load_aarch64(struct user_address_space *as, const void *image, size_t image_size, uint64_t load_base,
+                      struct loaded_elf *out) {
   if (image_size < sizeof(struct elf64_ehdr)) { return false; }
 
   const struct elf64_ehdr *ehdr = image;
-  const unsigned char magic[4] = {0x7f, 'E', 'L', 'F'};
-  if (kmemcmp(ehdr->e_ident, magic, sizeof(magic)) != 0 || ehdr->e_ident[4] != 2 || ehdr->e_ident[5] != 1 ||
-      (ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) || ehdr->e_machine != EM_AARCH64 ||
-      ehdr->e_phentsize != sizeof(struct elf64_phdr) ||
-      !bounds_ok(ehdr->e_phoff, (uint64_t)ehdr->e_phentsize * ehdr->e_phnum, image_size)) {
-    return false;
-  }
+  if (!valid_ehdr(ehdr, image_size)) { return false; }
 
   const struct elf64_phdr *phdrs = (const void *)((const uint8_t *)image + ehdr->e_phoff);
   uint64_t high = 0;
   uint64_t phdr_va = 0;
+  uint64_t base = ehdr->e_type == ET_DYN ? load_base : 0;
 
   for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
     const struct elf64_phdr *ph = &phdrs[i];
@@ -86,8 +121,9 @@ bool elf_load_static_aarch64(struct user_address_space *as, const void *image, s
       return false;
     }
 
-    uint64_t start = align_down(ph->p_vaddr, PAGE_SIZE);
-    uint64_t end = align_up(ph->p_vaddr + ph->p_memsz, PAGE_SIZE);
+    uint64_t seg_vaddr = base + ph->p_vaddr;
+    uint64_t start = align_down(seg_vaddr, PAGE_SIZE);
+    uint64_t end = align_up(seg_vaddr + ph->p_memsz, PAGE_SIZE);
     uint32_t flags = phdr_to_vmm_flags(ph->p_flags);
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
       uint64_t pa = pmm_alloc_zero_page();
@@ -95,27 +131,31 @@ bool elf_load_static_aarch64(struct user_address_space *as, const void *image, s
 
       uint64_t page_file_start = 0;
       uint64_t page_file_len = 0;
-      uint64_t seg_page_start = va > ph->p_vaddr ? va : ph->p_vaddr;
-      uint64_t seg_file_end = ph->p_vaddr + ph->p_filesz;
+      uint64_t seg_page_start = va > seg_vaddr ? va : seg_vaddr;
+      uint64_t seg_file_end = seg_vaddr + ph->p_filesz;
       if (seg_page_start < seg_file_end) {
         uint64_t seg_page_end = va + PAGE_SIZE;
         uint64_t copy_end = seg_page_end < seg_file_end ? seg_page_end : seg_file_end;
-        page_file_start = ph->p_offset + (seg_page_start - ph->p_vaddr);
+        page_file_start = ph->p_offset + (seg_page_start - seg_vaddr);
         page_file_len = copy_end - seg_page_start;
         void *dst = (void *)(uintptr_t)(as->hhdm_offset + pa + (seg_page_start - va));
         const void *src = (const uint8_t *)image + page_file_start;
         kmemcpy(dst, src, page_file_len);
       }
     }
+    finalize_segment_permissions(as, start, end, flags);
 
-    if (ph->p_vaddr + ph->p_memsz > high) { high = ph->p_vaddr + ph->p_memsz; }
+    if (seg_vaddr + ph->p_memsz > high) { high = seg_vaddr + ph->p_memsz; }
     if (ehdr->e_phoff >= ph->p_offset &&
         ehdr->e_phoff + (uint64_t)ehdr->e_phentsize * ehdr->e_phnum <= ph->p_offset + ph->p_filesz) {
-      phdr_va = ph->p_vaddr + (ehdr->e_phoff - ph->p_offset);
+      phdr_va = seg_vaddr + (ehdr->e_phoff - ph->p_offset);
     }
   }
 
-  out->entry = ehdr->e_entry;
+  out->entry = base + ehdr->e_entry;
+  out->runtime_entry = out->entry;
+  out->load_base = base;
+  out->at_base = 0;
   out->phdr = phdr_va;
   out->phent = ehdr->e_phentsize;
   out->phnum = ehdr->e_phnum;
@@ -123,4 +163,9 @@ bool elf_load_static_aarch64(struct user_address_space *as, const void *image, s
   as->brk_base = out->brk_base;
   as->brk_current = out->brk_base;
   return high != 0;
+}
+
+bool elf_load_static_aarch64(struct user_address_space *as, const void *image, size_t image_size,
+                             struct loaded_elf *out) {
+  return elf_load_aarch64(as, image, image_size, 0, out);
 }

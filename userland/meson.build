@@ -4,9 +4,22 @@ userland_cc = [
   userland_zig,
   'cc',
   '-target', 'aarch64-linux-musl',
+  '-dynamic',
+  '-std=c23',
+  '-D_GNU_SOURCE',
+  '-s',
+  '-Wl,-dynamic-linker,/lib/ld-musl-aarch64.so.1',
+  '-Wl,-rpath,/lib',
+  userland_include_arg,
+]
+userland_static_cc = [
+  userland_zig,
+  'cc',
+  '-target', 'aarch64-linux-musl',
   '-static',
   '-std=c23',
   '-D_GNU_SOURCE',
+  '-s',
   userland_include_arg,
 ]
 userland_image_targets = []

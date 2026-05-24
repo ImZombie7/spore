@@ -4,12 +4,21 @@ CLANG_FORMAT ?= clang-format
 QEMU_RUNNER ?= $(BUILD_DIR)/tools/spore-run
 QEMU ?= qemu-system-aarch64
 EDK2_VARS ?= $(BUILD_DIR)/edk2-vars.fd
-RUN_CMD = cd "$(CURDIR)" && $(QEMU_RUNNER) --mode plain --timings --tmux-log-pane --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/image.img" --root "$(BUILD_DIR)/root.ext2" --qemu "$(QEMU)"
+RUN_ROOT ?= $(BUILD_DIR)/run-root.ext2
+TEST_RUN_ROOT ?= $(BUILD_DIR)/test-run-root.ext2
+RUN_CMD = cd "$(CURDIR)" && $(QEMU_RUNNER) --mode plain --timings --tmux-log-pane --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/image.img" --root "$(RUN_ROOT)" --qemu "$(QEMU)"
 
-.PHONY: setup build image test-image runner test run run-tests run-shell-check format clean
+.DEFAULT_GOAL := all
+
+.PHONY: all setup build image test-image runner run-root test-run-root test run run-tests run-shell-check format clean
+
+all: image test-image runner
 
 setup:
-	@test -d "$(BUILD_DIR)" || $(MESON) setup "$(BUILD_DIR)" --cross-file cross/aarch64-elf.ini
+	@if [ -d "$(BUILD_DIR)" ] && [ ! -f "$(BUILD_DIR)/build.ninja" ]; then \
+		rm -rf "$(BUILD_DIR)"; \
+	fi
+	@test -d "$(BUILD_DIR)" || $(MESON) setup "$(BUILD_DIR)"
 
 build: setup
 	$(MESON) compile -C "$(BUILD_DIR)"
@@ -23,21 +32,27 @@ test-image: setup
 runner: setup
 	$(MESON) compile -C "$(BUILD_DIR)" spore-run
 
+run-root: image
+	cp -f "$(BUILD_DIR)/root.ext2" "$(RUN_ROOT)"
+
+test-run-root: test-image
+	cp -f "$(BUILD_DIR)/test_root.ext2" "$(TEST_RUN_ROOT)"
+
 test: build
 	$(MESON) test -C "$(BUILD_DIR)"
 
-run: image runner
+run: runner run-root
 	@if [ -n "$$TMUX" ]; then \
 		$(RUN_CMD); \
 	else \
 		tmux new-session '$(RUN_CMD)'; \
 	fi
 
-run-tests: test-image runner
-	$(QEMU_RUNNER) --mode filter --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/test_image.img" --root "$(BUILD_DIR)/test_root.ext2"
+run-tests: runner test-run-root
+	$(QEMU_RUNNER) --mode filter --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/test_image.img" --root "$(TEST_RUN_ROOT)"
 
-run-shell-check: image runner
-	$(QEMU_RUNNER) --mode shell --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/image.img" --root "$(BUILD_DIR)/root.ext2"
+run-shell-check: runner run-root
+	$(QEMU_RUNNER) --mode shell --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/image.img" --root "$(RUN_ROOT)"
 
 format:
 	find bootloader kernel tests userland -type f \( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' -o -name '*.hpp' \) -print0 | xargs -0 $(CLANG_FORMAT) -i

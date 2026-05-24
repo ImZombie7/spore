@@ -74,7 +74,7 @@ bool build_initial_stack_args(struct user_address_space *as, const struct loaded
     {AT_PHENT, elf->phent},
     {AT_PHNUM, elf->phnum},
     {AT_PAGESZ, PAGE_SIZE},
-    {AT_BASE, 0},
+    {AT_BASE, elf->at_base},
     {AT_ENTRY, elf->entry},
     {AT_UID, 0},
     {AT_EUID, 0},

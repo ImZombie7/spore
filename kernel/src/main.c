@@ -338,12 +338,33 @@ void kernel_main(const struct spore_boot_info *boot_info) {
     }
   }
   kprintf("[kernel] loading /init\n");
+  char interp_path[128];
+  bool has_interp = elf_find_interp_aarch64(init_data, (size_t)init_size, interp_path, sizeof(interp_path));
 
   struct user_address_space as;
   struct loaded_elf elf;
   uint64_t user_sp;
-  if (!vmm_user_init(&as, boot->hhdm_offset) || !elf_load_static_aarch64(&as, init_data, init_size, &elf) ||
-      !build_initial_stack(&as, &elf, &user_sp)) {
+  if (!vmm_user_init(&as, boot->hhdm_offset) || !elf_load_aarch64(&as, init_data, init_size, 0, &elf)) {
+    kprintf("[kernel] failed to prepare /init\n");
+    for (;;) {
+      __asm__ volatile("wfe");
+    }
+  }
+  if (has_interp) {
+    const void *interp_data = NULL;
+    uint64_t interp_size = 0;
+    struct loaded_elf interp;
+    if (!vfs_lookup_exec(interp_path, &interp_data, &interp_size) ||
+        !elf_load_aarch64(&as, interp_data, (size_t)interp_size, 0x0000006000000000ull, &interp)) {
+      kprintf("[kernel] failed to load %s\n", interp_path);
+      for (;;) {
+        __asm__ volatile("wfe");
+      }
+    }
+    elf.runtime_entry = interp.entry;
+    elf.at_base = interp.load_base;
+  }
+  if (!build_initial_stack(&as, &elf, &user_sp)) {
     kprintf("[kernel] failed to prepare /init\n");
     for (;;) {
       __asm__ volatile("wfe");
@@ -351,7 +372,7 @@ void kernel_main(const struct spore_boot_info *boot_info) {
   }
 
   uint64_t kernel_sp = (uint64_t)(uintptr_t)(kernel_stack + sizeof(kernel_stack));
-  switch_stack_and_finish(kernel_sp, &as, elf.entry, user_sp);
+  switch_stack_and_finish(kernel_sp, &as, elf.runtime_entry, user_sp);
 
   for (;;) {
     __asm__ volatile("wfe");
