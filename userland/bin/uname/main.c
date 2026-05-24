@@ -133,7 +133,7 @@ int main(int argc, char **argv) {
   if (fields & FIELD_MACHINE) { print_field(&printed, u.machine); }
   if (fields & FIELD_PROCESSOR) { print_field(&printed, u.machine); }
   if (fields & FIELD_PLATFORM) { print_field(&printed, u.machine); }
-  if (fields & FIELD_OS) { print_field(&printed, u.domainname); }
+  if (fields & FIELD_OS) { print_field(&printed, u.sysname); }
 
   putchar('\n');
   return EXIT_SUCCESS;
