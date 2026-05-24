@@ -1328,6 +1328,44 @@ size_t cell_resident_pages(uint64_t start, uint64_t end) {
   return domain == NULL ? 0 : vmm_mapped_pages_in_range(&domain->as, start, end);
 }
 
+static size_t domain_resident_pages(const struct domain *domain) {
+  size_t pages = 0;
+  for (size_t i = 0; i < MAX_VMAS; ++i) {
+    const struct vma *vma = &domain->vmas.entries[i];
+    if (vma->used) { pages += vmm_mapped_pages_in_range(&domain->as, vma->start, vma->end); }
+  }
+  return pages;
+}
+
+size_t cell_proc_info(struct proc_info *out, size_t max) {
+  size_t count = 0;
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    const struct thread *thread = &threads[i];
+    if (thread->state == THREAD_UNUSED || thread->domain == NULL) { continue; }
+    if (count < max && out != NULL) {
+      const struct domain *domain = thread->domain;
+      struct proc_info info = {
+        .pid = (uint32_t)domain->id,
+        .tid = (uint32_t)thread->tid,
+        .ppid = (uint32_t)domain->parent_id,
+        .state = (uint32_t)thread->state,
+        .wait_reason = (uint32_t)thread->wait_reason,
+        .resident_pages = domain_resident_pages(domain),
+        .remaining_ticks = domain->budget.remaining_ticks,
+        .max_ticks = domain->budget.max_ticks,
+      };
+      size_t j = 0;
+      for (; j + 1 < sizeof(info.cwd) && domain->cwd[j] != '\0'; ++j) {
+        info.cwd[j] = domain->cwd[j];
+      }
+      info.cwd[j] = '\0';
+      out[count] = info;
+    }
+    ++count;
+  }
+  return count;
+}
+
 int snapshot_create_current(void) {
   struct domain *domain = current_domain();
   struct snapshot *snap = alloc_snapshot();

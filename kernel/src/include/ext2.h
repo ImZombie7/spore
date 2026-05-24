@@ -39,6 +39,14 @@ struct ext2_dirent {
   char name[EXT2_NAME_MAX + 1];
 };
 
+struct ext2_info {
+  uint32_t block_size;
+  uint32_t block_count;
+  uint32_t free_blocks;
+  uint32_t inode_count;
+  uint32_t free_inodes;
+};
+
 bool ext2_mount(struct ext2_fs *fs, ext2_read_fn read, void *ctx);
 bool ext2_mount_rw(struct ext2_fs *fs, ext2_read_fn read, ext2_write_fn write, void *ctx);
 bool ext2_lookup(struct ext2_fs *fs, const char *path, struct ext2_node *out);
@@ -56,3 +64,4 @@ bool ext2_rename(struct ext2_fs *fs, const char *old_path, const char *new_path)
 bool ext2_dirent(struct ext2_fs *fs, const struct ext2_node *dir, size_t index, struct ext2_dirent *out);
 bool ext2_is_dir(const struct ext2_node *node);
 bool ext2_is_regular(const struct ext2_node *node);
+bool ext2_info(struct ext2_fs *fs, struct ext2_info *out);

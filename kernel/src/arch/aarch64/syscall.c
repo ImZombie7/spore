@@ -97,6 +97,8 @@ enum {
   SYS_SPORE_SET_BUDGET = 0x4004,
   SYS_SPORE_APPLY_POLICY = 0x4005,
   SYS_SPORE_SHUTDOWN = 0x4006,
+  SYS_SPORE_PROCINFO = 0x4007,
+  SYS_SPORE_FSINFO = 0x4008,
   MAP_PRIVATE = 0x02,
   MAP_FIXED = 0x10,
   MAP_ANONYMOUS = 0x20,
@@ -240,6 +242,14 @@ struct winsize64 {
   uint16_t ws_col;
   uint16_t ws_xpixel;
   uint16_t ws_ypixel;
+};
+
+struct fs_info64 {
+  uint64_t block_size;
+  uint64_t block_count;
+  uint64_t free_blocks;
+  uint64_t inode_count;
+  uint64_t free_inodes;
 };
 
 static struct user_address_space *current_as;
@@ -1096,6 +1106,30 @@ static int64_t dispatch(struct trap_frame *f) {
     kprintf("[kernel] shutdown\n");
     system_poweroff();
     return 0;
+  case SYS_SPORE_PROCINFO: {
+    size_t max = a1 / sizeof(struct proc_info);
+    if (a0 == 0 || max == 0) { return (int64_t)cell_proc_info(NULL, 0); }
+    struct proc_info infos[MAX_THREADS];
+    size_t count = cell_proc_info(infos, max);
+    size_t copy = count < max ? count : max;
+    return user_writable(a0, copy * sizeof(infos[0])) &&
+               vmm_copy_to_user(active_as(), a0, infos, copy * sizeof(infos[0]))
+             ? (int64_t)count
+             : -(int64_t)EFAULT;
+  }
+  case SYS_SPORE_FSINFO: {
+    struct vfs_fs_info raw;
+    if (!vfs_fs_info(&raw)) { return -(int64_t)EINVAL; }
+    struct fs_info64 info = {
+      .block_size = raw.block_size,
+      .block_count = raw.block_count,
+      .free_blocks = raw.free_blocks,
+      .inode_count = raw.inode_count,
+      .free_inodes = raw.free_inodes,
+    };
+    return user_writable(a0, sizeof(info)) && vmm_copy_to_user(active_as(), a0, &info, sizeof(info)) ? 0
+                                                                                                     : -(int64_t)EFAULT;
+  }
   case SYS_BRK:
     return sys_brk(a0);
   case SYS_MMAP:

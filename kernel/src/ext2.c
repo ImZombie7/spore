@@ -298,6 +298,19 @@ bool ext2_is_regular(const struct ext2_node *node) {
   return (node->mode & EXT2_S_IFREG) == EXT2_S_IFREG;
 }
 
+bool ext2_info(struct ext2_fs *fs, struct ext2_info *out) {
+  struct ext2_super sb;
+  if (fs == NULL || out == NULL || !read_super(fs, &sb)) { return false; }
+  *out = (struct ext2_info){
+    .block_size = fs->block_size,
+    .block_count = sb.blocks_count,
+    .free_blocks = sb.free_blocks_count,
+    .inode_count = sb.inodes_count,
+    .free_inodes = sb.free_inodes_count,
+  };
+  return true;
+}
+
 bool ext2_read_file(struct ext2_fs *fs, const struct ext2_node *node, uint64_t off, void *dst, uint32_t len,
                     uint32_t *read_out) {
   uint8_t *out = dst;

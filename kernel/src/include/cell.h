@@ -125,6 +125,19 @@ struct snapshot {
   struct vma_list vmas;
 };
 
+struct proc_info {
+  uint32_t pid;
+  uint32_t tid;
+  uint32_t ppid;
+  uint32_t state;
+  uint32_t wait_reason;
+  uint32_t _pad;
+  uint64_t resident_pages;
+  uint64_t remaining_ticks;
+  uint64_t max_ticks;
+  char cwd[64];
+};
+
 void cell_system_init(uint64_t hhdm_offset);
 bool cell_create_init(struct user_address_space *as, uint64_t entry, uint64_t sp);
 struct user_address_space *cell_current_as(void);
@@ -180,6 +193,7 @@ bool cell_add_vma(uint64_t start, uint64_t end, uint32_t prot, uint32_t flags);
 bool cell_remove_vma(uint64_t start, uint64_t end);
 bool cell_protect_vma(uint64_t start, uint64_t end, uint32_t prot);
 size_t cell_resident_pages(uint64_t start, uint64_t end);
+size_t cell_proc_info(struct proc_info *out, size_t max);
 int cell_set_budget(int domain_id, uint64_t ticks);
 void cell_timer_tick(struct trap_frame *frame, bool from_lower_el);
 void cell_wake_stdin(void);

@@ -305,3 +305,27 @@ bool vfs_dirent(const struct vfs_node *dir, size_t index, struct vfs_dirent *out
   }
   return false;
 }
+
+bool vfs_fs_info(struct vfs_fs_info *out) {
+  if (out == NULL) { return false; }
+  if (root_ext2 != NULL) {
+    struct ext2_info info;
+    if (!ext2_info(root_ext2, &info)) { return false; }
+    *out = (struct vfs_fs_info){
+      .block_size = info.block_size,
+      .block_count = info.block_count,
+      .free_blocks = info.free_blocks,
+      .inode_count = info.inode_count,
+      .free_inodes = info.free_inodes,
+    };
+    return true;
+  }
+  *out = (struct vfs_fs_info){
+    .block_size = 1,
+    .block_count = 0,
+    .free_blocks = 0,
+    .inode_count = 0,
+    .free_inodes = 0,
+  };
+  return true;
+}

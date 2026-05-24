@@ -15,6 +15,16 @@ userland/bin/head /bin/head
 userland/bin/tail /bin/tail
 userland/bin/wc /bin/wc
 userland/bin/grep /bin/grep
+userland/bin/find /bin/find
+userland/bin/sort /bin/sort
+userland/bin/uniq /bin/uniq
+userland/bin/cut /bin/cut
+userland/bin/tr /bin/tr
+userland/bin/sed-lite /bin/sed-lite
+userland/bin/tar /bin/tar
+userland/bin/ps /bin/ps
+userland/bin/top /bin/top
+userland/bin/df /bin/df
 userland/bin/dirname /bin/dirname
 userland/bin/basename /bin/basename
 userland/bin/sleep /bin/sleep

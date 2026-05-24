@@ -33,6 +33,14 @@ struct vfs_dirent {
   char name[256];
 };
 
+struct vfs_fs_info {
+  uint64_t block_size;
+  uint64_t block_count;
+  uint64_t free_blocks;
+  uint64_t inode_count;
+  uint64_t free_inodes;
+};
+
 void vfs_init(struct ramfs *ramfs, struct ext2_fs *ext2, uint64_t hhdm_offset);
 bool vfs_lookup(const char *path, struct vfs_node *out);
 bool vfs_lookup_exec(const char *path, const void **data, uint64_t *size);
@@ -48,3 +56,4 @@ uint64_t vfs_read(const struct vfs_node *node, uint64_t off, void *dst, uint64_t
 int64_t vfs_write(const struct vfs_node *node, uint64_t off, const void *src, uint64_t len);
 bool vfs_refresh(const struct vfs_node *node, struct vfs_node *out);
 bool vfs_dirent(const struct vfs_node *dir, size_t index, struct vfs_dirent *out);
+bool vfs_fs_info(struct vfs_fs_info *out);
