@@ -1,8 +1,10 @@
 #include <spore.h>
 
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -15,6 +17,7 @@ struct signal_case {
 static const struct signal_case cases[] = {
   {"SIGINT", SIGINT},
   {"SIGTERM", SIGTERM},
+  {"SIGSEGV", SIGSEGV},
   {"SIGKILL", SIGKILL},
 };
 
@@ -30,6 +33,13 @@ static int parse_signal(const char *text) {
     if (streq(text, cases[i].name) || streq(text, cases[i].name + 3)) { return cases[i].value; }
   }
   return atoi(text);
+}
+
+static const char *signal_name(int sig) {
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+    if (cases[i].value == sig) { return cases[i].name; }
+  }
+  return "SIGNAL";
 }
 
 static void spin_ms(unsigned long ms) {
@@ -66,10 +76,45 @@ static int run_one(int sig) {
   return EXIT_SUCCESS;
 }
 
+static void crash_with(int sig) {
+  if (sig == SIGSEGV) {
+    puts("signal-crash: taking SIGSEGV by writing through a bad pointer");
+    fflush(stdout);
+    volatile int *bad = (volatile int *)(uintptr_t)0xdead;
+    *bad = 1;
+    for (;;) {}
+  }
+  printf("signal-crash: sending %s to self pid %d\n", signal_name(sig), (int)getpid());
+  fflush(stdout);
+  (void)kill(getpid(), sig);
+  for (;;) {}
+}
+
+static int interactive(void) {
+  char line[64];
+  puts("signal-crash: type SIGINT, SIGTERM, SIGKILL, or SIGSEGV");
+  fputs("signal> ", stdout);
+  fflush(stdout);
+  if (fgets(line, sizeof(line), stdin) == NULL) { return EXIT_FAILURE; }
+  size_t len = strlen(line);
+  while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+    line[--len] = '\0';
+  }
+  int sig = parse_signal(line);
+  if (sig <= 0) {
+    fprintf(stderr, "signal-crash: unknown signal: %s\n", line);
+    return EXIT_FAILURE;
+  }
+  crash_with(sig);
+  return EXIT_FAILURE;
+}
+
 int main(int argc, char **argv) {
-  if (argc <= 1 || streq(argv[1], "all")) {
+  if (argc <= 1) { return interactive(); }
+  if (streq(argv[1], "all")) {
     int rc = EXIT_SUCCESS;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      if (cases[i].value == SIGSEGV) { continue; }
       if (run_one(cases[i].value) != EXIT_SUCCESS) { rc = EXIT_FAILURE; }
     }
     return rc;
@@ -81,5 +126,6 @@ int main(int argc, char **argv) {
       spin_ms(100);
     }
   }
-  return run_one(parse_signal(argv[1]));
+  crash_with(parse_signal(argv[1]));
+  return EXIT_FAILURE;
 }

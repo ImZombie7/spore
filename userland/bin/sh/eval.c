@@ -32,7 +32,8 @@ struct signal_name {
 };
 
 static const struct signal_name signals[] = {
-  {"INT", SIGINT}, {"SIGINT", SIGINT}, {"KILL", SIGKILL}, {"SIGKILL", SIGKILL}, {"TERM", SIGTERM}, {"SIGTERM", SIGTERM},
+  {"INT", SIGINT},   {"SIGINT", SIGINT},   {"KILL", SIGKILL}, {"SIGKILL", SIGKILL},
+  {"SEGV", SIGSEGV}, {"SIGSEGV", SIGSEGV}, {"TERM", SIGTERM}, {"SIGTERM", SIGTERM},
 };
 
 static bool parse_signal(const char *text, int *out) {
@@ -50,6 +51,20 @@ static bool parse_signal(const char *text, int *out) {
     }
   }
   return false;
+}
+
+static const char *signal_message(int sig) {
+  switch (sig) {
+  case SIGINT:
+    return "Interrupted";
+  case SIGKILL:
+    return "Killed";
+  case SIGSEGV:
+    return "Segmentation fault";
+  case SIGTERM:
+    return "Terminated";
+  }
+  return "Signaled";
 }
 
 static void remember_job(pid_t pid, char **argv) {
@@ -146,7 +161,10 @@ static int wait_status(pid_t pid) {
     return 1;
   }
   if (WIFEXITED(status)) { return WEXITSTATUS(status); }
-  if (WIFSIGNALED(status)) { return 128 + WTERMSIG(status); }
+  if (WIFSIGNALED(status)) {
+    puts(signal_message(WTERMSIG(status)));
+    return 128 + WTERMSIG(status);
+  }
   return 128;
 }
 

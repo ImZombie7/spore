@@ -18,6 +18,12 @@ static int next_thread_id = 1;
 static int next_snapshot_id;
 static uint64_t device_rng_state = 0x9e3779b97f4a7c15ull;
 static uint64_t scheduler_ticks;
+static uint32_t tty_lflag = 0000002 | 0000010;
+static char tty_line[256];
+static size_t tty_line_len;
+static char tty_ready[512];
+static size_t tty_ready_head;
+static size_t tty_ready_len;
 
 static size_t domain_resident_pages(const struct domain *domain);
 
@@ -41,7 +47,10 @@ enum {
   WNOHANG = 1,
   SIGINT = 2,
   SIGKILL = 9,
+  SIGSEGV = 11,
   SIGTERM = 15,
+  TTY_ICANON = 0000002,
+  TTY_ECHO = 0000010,
   ROBUST_LIST_LIMIT = 16,
   FUTEX_OWNER_DIED = 0x40000000u,
 };
@@ -727,6 +736,24 @@ void cell_exit_group_current(int status, struct trap_frame *frame) {
   cell_schedule(frame);
 }
 
+void cell_signal_current(int signal, struct trap_frame *frame) {
+  if (current_thread == NULL) { return; }
+  struct domain *domain = current_thread->domain;
+  domain->exit_status = 128 + signal;
+  domain->term_signal = signal;
+  domain->zombie = true;
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    if (&threads[i] != current_thread && threads[i].domain == domain) {
+      threads[i].state = THREAD_UNUSED;
+      threads[i].domain = NULL;
+      if (domain->refcount > 0) { --domain->refcount; }
+    }
+  }
+  current_thread->state = THREAD_ZOMBIE;
+  wake_parent_of(domain);
+  cell_schedule(frame);
+}
+
 int cell_fork_current(struct trap_frame *frame) {
   struct domain *parent = current_domain();
   struct domain *child_domain = alloc_domain();
@@ -866,7 +893,7 @@ int cell_kill(int pid, int signal) {
   struct domain *domain = find_domain(pid);
   if (domain == NULL || domain->zombie) { return -ESRCH; }
   if (signal == 0) { return 0; }
-  if (signal != SIGTERM && signal != SIGINT && signal != SIGKILL) { return 0; }
+  if (signal != SIGTERM && signal != SIGINT && signal != SIGKILL && signal != SIGSEGV) { return 0; }
   domain->exit_status = 128 + signal;
   domain->term_signal = signal;
   domain->zombie = true;
@@ -1479,14 +1506,112 @@ int64_t cell_fd_write(int fd, uint64_t buf, uint64_t len) {
   return write_console_from_user(domain, buf, len);
 }
 
+static bool tty_canonical(void) {
+  return (tty_lflag & TTY_ICANON) != 0;
+}
+
+static bool tty_echo(void) {
+  return (tty_lflag & TTY_ECHO) != 0;
+}
+
+uint32_t cell_tty_lflag(void) {
+  return tty_lflag;
+}
+
+void cell_tty_set_lflag(uint32_t lflag) {
+  tty_lflag = lflag;
+  if (!tty_canonical()) {
+    tty_line_len = 0;
+    tty_ready_head = 0;
+    tty_ready_len = 0;
+  }
+}
+
+static void tty_echo_char(char c) {
+  if (!tty_echo()) { return; }
+  if (c == '\n') {
+    pl011_putc('\n');
+  } else if (c == '\b' || c == 0x7f) {
+    pl011_putc('\b');
+    pl011_putc(' ');
+    pl011_putc('\b');
+  } else if ((uint8_t)c >= 0x20 || c == '\t') {
+    pl011_putc(c);
+  }
+}
+
+static void tty_ready_push(char c) {
+  if (tty_ready_len >= sizeof(tty_ready)) { return; }
+  size_t index = (tty_ready_head + tty_ready_len) % sizeof(tty_ready);
+  tty_ready[index] = c;
+  ++tty_ready_len;
+}
+
+static bool tty_ready_pop(char *out) {
+  if (tty_ready_len == 0) { return false; }
+  *out = tty_ready[tty_ready_head];
+  tty_ready_head = (tty_ready_head + 1u) % sizeof(tty_ready);
+  --tty_ready_len;
+  return true;
+}
+
+static void tty_line_commit(void) {
+  for (size_t i = 0; i < tty_line_len; ++i) {
+    tty_ready_push(tty_line[i]);
+  }
+  tty_ready_push('\n');
+  tty_line_len = 0;
+}
+
+static void tty_process_input(void) {
+  char c;
+  while (tty_ready_len == 0 && pl011_getc(&c)) {
+    if (!tty_canonical()) {
+      tty_ready_push(c);
+      return;
+    }
+    if (c == '\r') { c = '\n'; }
+    if (c == '\n') {
+      tty_echo_char('\n');
+      tty_line_commit();
+      return;
+    }
+    if (c == 3) {
+      if (tty_echo()) {
+        pl011_putc('^');
+        pl011_putc('C');
+        pl011_putc('\n');
+      }
+      tty_line_len = 0;
+      tty_ready_push('\n');
+      return;
+    }
+    if (c == '\b' || c == 0x7f) {
+      if (tty_line_len > 0) {
+        --tty_line_len;
+        tty_echo_char('\b');
+      }
+      continue;
+    }
+    if ((uint8_t)c < 0x20 && c != '\t') { continue; }
+    if (tty_line_len + 1 < sizeof(tty_line)) {
+      tty_line[tty_line_len++] = c;
+      tty_echo_char(c);
+    }
+  }
+}
+
 static int64_t read_stdin_to_user(struct domain *domain, uint64_t buf, uint64_t len) {
   uint64_t n = 0;
   while (n < len) {
     char c;
-    if (!pl011_getc(&c)) { break; }
+    if (!tty_ready_pop(&c)) {
+      tty_process_input();
+      if (!tty_ready_pop(&c)) { break; }
+    }
     if (!vmm_copy_to_user(&domain->as, buf + n, &c, 1)) { return -14; }
     ++n;
-    if (c == '\n' || c == '\r') { break; }
+    if (tty_canonical() && c == '\n') { break; }
   }
   return (int64_t)n;
 }

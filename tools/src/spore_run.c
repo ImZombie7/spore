@@ -64,6 +64,7 @@ static const char *shell_commands[] = {
   "wait\n",
   "jobs\n",
   "/demos/signal-crash all\n",
+  "printf 'SIGSEGV\\n' > /tmp/sigsegv && /demos/signal-crash < /tmp/sigsegv\n",
   "/demos/signal-crash sleep &\n",
   "jobs\n",
   "kill -9 %1\n",

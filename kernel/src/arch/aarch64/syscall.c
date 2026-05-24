@@ -1050,7 +1050,7 @@ static int64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg) {
       .c_iflag = 0,
       .c_oflag = 0,
       .c_cflag = 0,
-      .c_lflag = ICANON | ECHO,
+      .c_lflag = cell_tty_lflag(),
       .c_line = 0,
       .c_cc = {0},
       .c_ispeed = 38400,
@@ -1063,10 +1063,12 @@ static int64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg) {
                                                                                                     : -(int64_t)EFAULT;
   }
   if (request == TCSETS || request == TCSETSW || request == TCSETSF) {
-    struct termios64 ignored;
-    return user_readable(arg, sizeof(ignored)) && vmm_copy_from_user(active_as(), &ignored, arg, sizeof(ignored))
-             ? 0
-             : -(int64_t)EFAULT;
+    struct termios64 tio;
+    if (!user_readable(arg, sizeof(tio)) || !vmm_copy_from_user(active_as(), &tio, arg, sizeof(tio))) {
+      return -(int64_t)EFAULT;
+    }
+    cell_tty_set_lflag(tio.c_lflag);
+    return 0;
   }
   return -(int64_t)EINVAL;
 }
@@ -1244,14 +1246,14 @@ l_wait4: {
   return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
 }
 l_kill:
-  if ((int)a0 == cell_current_pid() && ((int)a1 == 2 || (int)a1 == 9 || (int)a1 == 15)) {
-    cell_exit_group_current(128 + (int)a1, f);
+  if ((int)a0 == cell_current_pid() && ((int)a1 == 2 || (int)a1 == 9 || (int)a1 == 11 || (int)a1 == 15)) {
+    cell_signal_current((int)a1, f);
     return SYSCALL_SWITCHED;
   }
   return cell_kill((int)a0, (int)a1);
 l_tgkill:
-  if ((int)a1 == cell_current_pid() && ((int)a2 == 2 || (int)a2 == 9 || (int)a2 == 15)) {
-    cell_exit_group_current(128 + (int)a2, f);
+  if ((int)a1 == cell_current_pid() && ((int)a2 == 2 || (int)a2 == 9 || (int)a2 == 11 || (int)a2 == 15)) {
+    cell_signal_current((int)a2, f);
     return SYSCALL_SWITCHED;
   }
   return cell_kill((int)a1, (int)a2);
@@ -1433,7 +1435,7 @@ void handle_lower_sync(struct trap_frame *frame) {
     if (ec == 0x24 && write && dfsc >= 0x0c && dfsc <= 0x0f && cell_handle_cow_fault(far)) { return; }
     kprintf("[kernel] lower sync fault ec=%x esr=%x elr=%p far=%p\n", (unsigned)ec, (unsigned)frame->esr_el1,
             (void *)(uintptr_t)frame->elr_el1, (void *)(uintptr_t)far);
-    cell_exit_group_current(128, frame);
+    cell_signal_current(11, frame);
     return;
   }
   int64_t ret = dispatch(frame);

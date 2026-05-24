@@ -74,37 +74,12 @@ static int read_line(char *buf, size_t cap, const char *prompt) {
   if (cap == 0) { return -1; }
   fputs(prompt, stdout);
   fflush(stdout);
-
-  size_t len = 0;
-  for (;;) {
-    char c;
-    ssize_t n = read(STDIN_FILENO, &c, 1);
-    if (n <= 0) { return -1; }
-    if (c == '\r') { c = '\n'; }
-    if (c == '\n') {
-      putchar('\n');
-      buf[len] = '\0';
-      return 0;
-    }
-    if (c == 3) {
-      puts("^C");
-      buf[0] = '\0';
-      return 0;
-    }
-    if (c == '\b' || c == 0x7f) {
-      if (len > 0) {
-        --len;
-        fputs("\b \b", stdout);
-        fflush(stdout);
-      }
-      continue;
-    }
-    if ((unsigned char)c < 0x20) { continue; }
-    if (len + 1 < cap) {
-      buf[len++] = c;
-      (void)write(STDOUT_FILENO, &c, 1);
-    }
+  if (fgets(buf, (int)cap, stdin) == NULL) { return -1; }
+  size_t len = strlen(buf);
+  while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+    buf[--len] = '\0';
   }
+  return 0;
 }
 
 static void read_insert(size_t index) {

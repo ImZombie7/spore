@@ -82,6 +82,20 @@ static int proc_cmp(const void *a, const void *b) {
   return 0;
 }
 
+static void fmt_mem(unsigned long long pages, char *out, size_t cap) {
+  unsigned long long kib = pages * 4ull;
+  if (kib < 1024) {
+    snprintf(out, cap, "%lluK", kib);
+    return;
+  }
+  unsigned long long tenths = (kib * 10ull + 512ull) / 1024ull;
+  if (tenths < 100 || (tenths % 10ull) != 0) {
+    snprintf(out, cap, "%llu.%lluM", tenths / 10ull, tenths % 10ull);
+    return;
+  }
+  snprintf(out, cap, "%lluM", tenths / 10ull);
+}
+
 static long load_procs(struct proc_row *infos, size_t cap) {
   FILE *f = fopen("/proc/procinfo", "r");
   if (f == NULL) { return -1; }
@@ -108,17 +122,19 @@ static int draw(void) {
   unsigned rows = screen_rows();
   printf("\033[H\033[2J");
   printf("\033[7m Spore top - %ld process%s  (q to quit) \033[m\r\n", n, n == 1 ? "" : "es");
-  printf("PID  PPID  STATE    RSS(K)  CPU  AGE  BUDGET       CMD\r\n");
+  printf("PID  PPID  STATE       MEM  CPU  AGE  BUDGET       CMD\r\n");
   unsigned used_rows = 2;
   for (long i = 0; i < n && used_rows + 1 < rows; ++i, ++used_rows) {
     char budget[32];
+    char mem[16];
     if (infos[i].budget_max == 0) {
       snprintf(budget, sizeof(budget), "unlimited");
     } else {
       snprintf(budget, sizeof(budget), "%llu/%llu", infos[i].budget_remaining, infos[i].budget_max);
     }
-    printf("%3u  %4u  %-7s  %6llu  %3llu  %3llu  %-11s  %s\r\n", infos[i].pid, infos[i].ppid, infos[i].state,
-           infos[i].rss_pages * 4, infos[i].cpu_ticks, infos[i].age_ticks, budget, infos[i].cmdline);
+    fmt_mem(infos[i].rss_pages, mem, sizeof(mem));
+    printf("%3u  %4u  %-7s  %6s  %3llu  %3llu  %-11s  %s\r\n", infos[i].pid, infos[i].ppid, infos[i].state, mem,
+           infos[i].cpu_ticks, infos[i].age_ticks, budget, infos[i].cmdline);
   }
   while (used_rows++ < rows - 1) {
     printf("\033[K\r\n");

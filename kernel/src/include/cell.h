@@ -172,6 +172,7 @@ void cell_restore_current(struct trap_frame *frame);
 void cell_schedule(struct trap_frame *frame);
 void cell_exit_thread_current(int status, struct trap_frame *frame);
 void cell_exit_group_current(int status, struct trap_frame *frame);
+void cell_signal_current(int signal, struct trap_frame *frame);
 int cell_fork_current(struct trap_frame *frame);
 int cell_clone_thread_current(struct trap_frame *frame, uint64_t flags, uint64_t newsp, uint64_t parent_tid,
                               uint64_t tls, uint64_t child_tid);
@@ -213,6 +214,8 @@ bool cell_remove_vma(uint64_t start, uint64_t end);
 bool cell_protect_vma(uint64_t start, uint64_t end, uint32_t prot);
 size_t cell_resident_pages(uint64_t start, uint64_t end);
 size_t cell_proc_info(struct proc_info *out, size_t max);
+uint32_t cell_tty_lflag(void);
+void cell_tty_set_lflag(uint32_t lflag);
 int cell_set_budget(int domain_id, uint64_t ticks);
 void cell_timer_tick(struct trap_frame *frame, bool from_lower_el);
 void cell_wake_stdin(void);

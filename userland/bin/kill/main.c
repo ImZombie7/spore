@@ -11,7 +11,8 @@ struct signal_name {
 };
 
 static const struct signal_name signals[] = {
-  {"INT", SIGINT}, {"SIGINT", SIGINT}, {"KILL", SIGKILL}, {"SIGKILL", SIGKILL}, {"TERM", SIGTERM}, {"SIGTERM", SIGTERM},
+  {"INT", SIGINT},   {"SIGINT", SIGINT},   {"KILL", SIGKILL}, {"SIGKILL", SIGKILL},
+  {"SEGV", SIGSEGV}, {"SIGSEGV", SIGSEGV}, {"TERM", SIGTERM}, {"SIGTERM", SIGTERM},
 };
 
 static bool parse_signal(const char *text, int *out) {
@@ -32,7 +33,7 @@ static bool parse_signal(const char *text, int *out) {
 }
 
 static void list_signals(void) {
-  puts("INT KILL TERM");
+  puts("INT KILL SEGV TERM");
 }
 
 int main(int argc, char **argv) {
