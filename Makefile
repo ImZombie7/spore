@@ -10,7 +10,7 @@ RUN_CMD = cd "$(CURDIR)" && $(QEMU_RUNNER) --mode plain --timings --tmux-log-pan
 
 .DEFAULT_GOAL := all
 
-.PHONY: all setup build image test-image runner run-root test-run-root test run run-tests run-shell-check kill format clean
+.PHONY: all setup build image test-image runner run-root test-run-root test run run-tests run-shell-check kill format fetch clean
 
 all: image test-image runner
 
@@ -66,6 +66,9 @@ kill:
 
 format:
 	find bootloader kernel tests userland -type f \( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' -o -name '*.hpp' \) -print0 | xargs -0 $(CLANG_FORMAT) -i
+
+fetch:
+	onefetch -e userland/third_party
 
 clean:
 	rm -rf "$(BUILD_DIR)"

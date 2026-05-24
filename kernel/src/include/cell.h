@@ -228,6 +228,7 @@ uint32_t cell_tty_lflag(void);
 void cell_tty_set_lflag(uint32_t lflag);
 int cell_set_budget(int domain_id, uint64_t ticks);
 void cell_timer_tick(struct trap_frame *frame, bool from_lower_el);
+void cell_set_boot_epoch(uint64_t epoch_sec);
 void cell_wake_stdin(void);
 int snapshot_create_current(void);
 int snapshot_spawn(int snap_id, uint64_t entry, uint64_t arg, struct trap_frame *frame);

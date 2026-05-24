@@ -181,6 +181,12 @@ static bool proc_kind_for_name(const char *name, enum ramfs_device *device) {
     *device = RAMFS_DEV_PROC_PID_STATUS;
   } else if (streq(name, "cmdline")) {
     *device = RAMFS_DEV_PROC_PID_CMDLINE;
+  } else if (streq(name, "statm")) {
+    *device = RAMFS_DEV_PROC_PID_STATM;
+  } else if (streq(name, "comm")) {
+    *device = RAMFS_DEV_PROC_PID_COMM;
+  } else if (streq(name, "mounts")) {
+    *device = RAMFS_DEV_PROC_PID_MOUNTS;
   } else if (streq(name, "cwd")) {
     *device = RAMFS_DEV_PROC_PID_CWD;
   } else if (streq(name, "exe")) {
@@ -188,6 +194,21 @@ static bool proc_kind_for_name(const char *name, enum ramfs_device *device) {
   } else {
     return false;
   }
+  return true;
+}
+
+static bool proc_pid_file_node(int pid, enum ramfs_device device, struct vfs_node *out) {
+  *out = (struct vfs_node){
+    .backend = VFS_PROC,
+    .ino = 110000u + (uint64_t)pid * 16u + (uint64_t)device,
+    .is_dir = false,
+    .writable = false,
+    .device = device,
+    .mode = 0100444u,
+    .links_count = 1,
+    .dev_id = VFS_DEV_PROC,
+    .proc_pid = pid,
+  };
   return true;
 }
 
@@ -230,20 +251,44 @@ static bool lookup_proc_dynamic(const char *path, struct vfs_node *out) {
   }
   if (*p != '/') { return false; }
   ++p;
+  if (streq(p, "task")) {
+    *out = (struct vfs_node){
+      .backend = VFS_PROC,
+      .ino = 120000u + (uint64_t)pid,
+      .is_dir = true,
+      .writable = false,
+      .device = RAMFS_DEV_NONE,
+      .mode = 0040555u,
+      .links_count = 1,
+      .dev_id = VFS_DEV_PROC,
+      .proc_pid = -pid,
+    };
+    return true;
+  }
+  if (starts_with(p, "task/")) {
+    p += 5;
+    int tid = 0;
+    if (!parse_uint_component(&p, &tid) || tid != pid || !cell_proc_exists(tid)) { return false; }
+    if (*p == '\0') {
+      *out = (struct vfs_node){
+        .backend = VFS_PROC,
+        .ino = 130000u + (uint64_t)pid,
+        .is_dir = true,
+        .writable = false,
+        .device = RAMFS_DEV_NONE,
+        .mode = 0040555u,
+        .links_count = 1,
+        .dev_id = VFS_DEV_PROC,
+        .proc_pid = pid,
+      };
+      return true;
+    }
+    if (*p != '/') { return false; }
+    ++p;
+  }
   enum ramfs_device device;
   if (!proc_kind_for_name(p, &device)) { return false; }
-  *out = (struct vfs_node){
-    .backend = VFS_PROC,
-    .ino = 110000u + (uint64_t)pid * 8u + (uint64_t)device,
-    .is_dir = false,
-    .writable = false,
-    .device = device,
-    .mode = 0100444u,
-    .links_count = 1,
-    .dev_id = VFS_DEV_PROC,
-    .proc_pid = pid,
-  };
-  return true;
+  return proc_pid_file_node(pid, device, out);
 }
 
 static void copy_path(char *dst, size_t cap, const char *src) {
@@ -505,9 +550,17 @@ bool vfs_refresh(const struct vfs_node *node, struct vfs_node *out) {
 
 bool vfs_dirent(const struct vfs_node *dir, size_t index, struct vfs_dirent *out) {
   if (dir->backend == VFS_PROC) {
-    static const char *names[] = {"stat", "status", "cmdline", "cwd", "exe"};
+    if (dir->proc_pid < 0) {
+      if (index != 0) { return false; }
+      int pid = -dir->proc_pid;
+      *out = (struct vfs_dirent){.ino = 130000u + (uint64_t)pid, .is_dir = true, .is_device = false};
+      utoa_dec((uint64_t)pid, out->name, sizeof(out->name));
+      return true;
+    }
+    static const char *names[] = {"stat", "status", "cmdline", "statm", "comm", "mounts", "cwd", "exe", "task"};
     if (!dir->is_dir || index >= sizeof(names) / sizeof(names[0])) { return false; }
-    *out = (struct vfs_dirent){.ino = dir->ino + index + 1, .is_dir = false, .is_device = false};
+    bool is_task = streq(names[index], "task");
+    *out = (struct vfs_dirent){.ino = dir->ino + index + 1, .is_dir = is_task, .is_device = false};
     kmemcpy(out->name, names[index], kstrlen(names[index]) + 1);
     return true;
   }

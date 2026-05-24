@@ -20,6 +20,7 @@ static int next_thread_id = 1;
 static int next_snapshot_id;
 static uint64_t device_rng_state = 0x9e3779b97f4a7c15ull;
 static uint64_t scheduler_ticks;
+static uint64_t boot_epoch_sec;
 static uint32_t tty_lflag = 0000002 | 0000010;
 static char tty_line[256];
 static size_t tty_line_len;
@@ -557,8 +558,8 @@ static void cap_allow(struct capability_set *caps, uint64_t nr) {
 static void cap_allow_common(struct capability_set *caps) {
   static const uint16_t common[] = {
     17,  23,  24,  25,  29,  57,  63,  64,  65,  66,  80,  93,  94,  96,  98,  99,  101,
-    113, 115, 123, 124, 134, 135, 160, 172, 173, 174, 175, 176, 177, 178, 179, 198, 200,
-    203, 204, 206, 207, 208, 214, 215, 216, 220, 221, 222, 226, 233, 260, 261, 278,
+    48,  113, 115, 123, 124, 134, 135, 160, 172, 173, 174, 175, 176, 177, 178, 179, 198, 200,
+    203, 204, 206, 207, 208, 214, 215, 216, 220, 221, 222, 226, 233, 260, 261, 278, 439,
   };
   for (size_t i = 0; i < sizeof(common) / sizeof(common[0]); ++i) {
     cap_allow(caps, common[i]);
@@ -950,6 +951,10 @@ int cell_set_budget(int domain_id, uint64_t ticks) {
   domain->budget.remaining_ticks = ticks;
   if (ticks != 0) { kprintf("[spore] domain %d CPU budget set to %u ticks\n", domain->id, (unsigned)ticks); }
   return 0;
+}
+
+void cell_set_boot_epoch(uint64_t epoch_sec) {
+  boot_epoch_sec = epoch_sec;
 }
 
 void cell_timer_tick(struct trap_frame *frame, bool from_lower_el) {
@@ -1483,12 +1488,38 @@ static size_t fs_tmp_text(char *dst, size_t cap) {
 
 static size_t stat_text(char *dst, size_t cap) {
   size_t len = 0;
+  uint64_t idle_ticks = scheduler_ticks > 0 ? scheduler_ticks : 1;
+  uint64_t running = 0;
+  uint64_t blocked = 0;
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    if (threads[i].state == THREAD_RUNNABLE) {
+      ++running;
+    } else if (threads[i].state == THREAD_BLOCKED) {
+      ++blocked;
+    }
+  }
   proc_append_str(dst, cap, &len, "cpu  ");
   proc_append_u64(dst, cap, &len, scheduler_ticks);
-  proc_append_str(dst, cap, &len, " 0 0 0\nprocesses ");
+  proc_append_str(dst, cap, &len, " 0 ");
+  proc_append_u64(dst, cap, &len, scheduler_ticks / 4);
+  proc_append_char(dst, cap, &len, ' ');
+  proc_append_u64(dst, cap, &len, idle_ticks);
+  proc_append_str(dst, cap, &len, " 0 0 0 0 0 0\ncpu0 ");
+  proc_append_u64(dst, cap, &len, scheduler_ticks);
+  proc_append_str(dst, cap, &len, " 0 ");
+  proc_append_u64(dst, cap, &len, scheduler_ticks / 4);
+  proc_append_char(dst, cap, &len, ' ');
+  proc_append_u64(dst, cap, &len, idle_ticks);
+  proc_append_str(dst, cap, &len, " 0 0 0 0 0 0\nctxt ");
+  proc_append_u64(dst, cap, &len, scheduler_ticks);
+  proc_append_str(dst, cap, &len, "\nbtime ");
+  proc_append_u64(dst, cap, &len, boot_epoch_sec);
+  proc_append_str(dst, cap, &len, "\nprocesses ");
   proc_append_u64(dst, cap, &len, (uint32_t)(next_domain_id - 1));
-  proc_append_str(dst, cap, &len, "\nthreads ");
-  proc_append_u64(dst, cap, &len, (uint32_t)(next_thread_id - 1));
+  proc_append_str(dst, cap, &len, "\nprocs_running ");
+  proc_append_u64(dst, cap, &len, running == 0 ? 1 : running);
+  proc_append_str(dst, cap, &len, "\nprocs_blocked ");
+  proc_append_u64(dst, cap, &len, blocked);
   proc_append_char(dst, cap, &len, '\n');
   return len;
 }
@@ -1551,6 +1582,30 @@ static size_t proc_pid_cmdline_text(char *dst, size_t cap, int pid) {
   if (domain == NULL) { return 0; }
   proc_append_str(dst, cap, &len, domain->exec_path[0] == '\0' ? domain->name : domain->exec_path);
   proc_append_char(dst, cap, &len, '\0');
+  return len;
+}
+
+static size_t proc_pid_statm_text(char *dst, size_t cap, int pid) {
+  size_t len = 0;
+  const struct domain *domain = domain_for_pid(pid);
+  if (domain == NULL) { return 0; }
+  uint64_t rss = domain_resident_pages(domain);
+  uint64_t virt = rss == 0 ? 1 : rss;
+  proc_append_u64(dst, cap, &len, virt);
+  proc_append_char(dst, cap, &len, ' ');
+  proc_append_u64(dst, cap, &len, rss);
+  proc_append_str(dst, cap, &len, " 0 0 0 ");
+  proc_append_u64(dst, cap, &len, rss);
+  proc_append_str(dst, cap, &len, " 0\n");
+  return len;
+}
+
+static size_t proc_pid_comm_text(char *dst, size_t cap, int pid) {
+  size_t len = 0;
+  const struct domain *domain = domain_for_pid(pid);
+  if (domain == NULL) { return 0; }
+  proc_append_str(dst, cap, &len, domain->name);
+  proc_append_char(dst, cap, &len, '\n');
   return len;
 }
 
@@ -1640,6 +1695,9 @@ static int64_t write_device(struct open_file *file, struct domain *domain, uint6
   case RAMFS_DEV_PROC_PID_STAT:
   case RAMFS_DEV_PROC_PID_STATUS:
   case RAMFS_DEV_PROC_PID_CMDLINE:
+  case RAMFS_DEV_PROC_PID_STATM:
+  case RAMFS_DEV_PROC_PID_COMM:
+  case RAMFS_DEV_PROC_PID_MOUNTS:
   case RAMFS_DEV_PROC_PID_CWD:
   case RAMFS_DEV_PROC_PID_EXE:
   case RAMFS_DEV_FS_ROOT:
@@ -1724,6 +1782,12 @@ static int64_t read_device(struct open_file *file, struct domain *domain, uint64
     return read_generated_pid_device(file, domain, buf, len, proc_pid_status_text);
   case RAMFS_DEV_PROC_PID_CMDLINE:
     return read_generated_pid_device(file, domain, buf, len, proc_pid_cmdline_text);
+  case RAMFS_DEV_PROC_PID_STATM:
+    return read_generated_pid_device(file, domain, buf, len, proc_pid_statm_text);
+  case RAMFS_DEV_PROC_PID_COMM:
+    return read_generated_pid_device(file, domain, buf, len, proc_pid_comm_text);
+  case RAMFS_DEV_PROC_PID_MOUNTS:
+    return read_generated_device(file, domain, buf, len, mounts_text);
   case RAMFS_DEV_PROC_PID_CWD:
     return read_generated_pid_device(file, domain, buf, len, proc_pid_cwd_text);
   case RAMFS_DEV_PROC_PID_EXE:

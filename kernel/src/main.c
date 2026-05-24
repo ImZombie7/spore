@@ -316,6 +316,7 @@ void kernel_main(const struct spore_boot_info *boot_info) {
 
   pmm_init(boot->hhdm_offset, memmap, boot->memmap_count);
   syscall_set_boot_time(boot->realtime_epoch_sec);
+  cell_set_boot_epoch(boot->realtime_epoch_sec);
   (void)virtio_console_init(boot->hhdm_offset);
   kprintf("[kernel] booted at EL%u\n", (unsigned)current_el());
   exceptions_init();

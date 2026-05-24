@@ -8,6 +8,7 @@ int main(void) {
   setenv("USER", "root", 0);
   setenv("LOGNAME", "root", 0);
   setenv("SHELL", "/bin/msh", 0);
+  setenv("TERM", "xterm-256color", 0);
 
   char line[LINE_CAP];
   int last = 0;
