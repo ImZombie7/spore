@@ -25,6 +25,7 @@ kernel_sources = files(
   'src/cell.c',
   'src/main.c',
   'src/drivers/pl011.c',
+  'src/drivers/virtio_net.c',
   'src/elf/loader.c',
   'src/exec/stack.c',
   'src/lib/mem.c',
@@ -127,6 +128,9 @@ qemu_base_args = [
   '-accel', 'hvf',
   '-cpu', 'host',
   '-m', '512M',
+  '-global', 'virtio-mmio.force-legacy=false',
+  '-netdev', 'user,id=sporenet',
+  '-device', 'virtio-net-device,netdev=sporenet,mac=52:54:00:12:34:56',
   '-boot', 'order=d,menu=off,strict=on',
   '-drive', 'if=pflash,format=raw,readonly=on,file=' + qemu_code,
 ]

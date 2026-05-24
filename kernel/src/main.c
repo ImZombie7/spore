@@ -10,6 +10,7 @@
 #include "mm/vmm.h"
 #include "pl011.h"
 #include "ramfs.h"
+#include "virtio_net.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -107,6 +108,8 @@ static uint64_t current_el(void) {
 
 enum {
     PL011_PHYS = 0x09000000,
+    VIRTIO_MMIO_PHYS = 0x0a000000,
+    VIRTIO_MMIO_PAGES = 4,
     GICD_PHYS = 0x08000000,
     GICR_PHYS = 0x080a0000,
     GICR_SGI_PHYS = 0x080b0000,
@@ -234,6 +237,9 @@ static void map_device_pages(void) {
         : "memory");
 
     map_device_page(PL011_PHYS);
+    for (size_t i = 0; i < VIRTIO_MMIO_PAGES; ++i) {
+        map_device_page(VIRTIO_MMIO_PHYS + i * EARLY_PAGE_SIZE);
+    }
     map_device_page(GICD_PHYS);
     map_device_page(GICR_PHYS);
     map_device_page(GICR_SGI_PHYS);
@@ -285,6 +291,9 @@ void kernel_main(const struct spore_boot_info *boot_info) {
     pmm_init(boot->hhdm_offset, memmap, boot->memmap_count);
     exceptions_init();
     timer_init(boot->hhdm_offset);
+    if (virtio_net_init(boot->hhdm_offset)) {
+        (void)virtio_net_smoke_tx();
+    }
     cell_system_init(boot->hhdm_offset);
 
     struct ramfs_file init;
