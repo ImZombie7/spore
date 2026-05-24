@@ -10,9 +10,17 @@ static struct ramfs *root_ramfs;
 static struct ext2_fs *root_ext2;
 static uint64_t root_hhdm;
 
+bool cell_proc_exists(int pid);
+int cell_proc_pid_at(size_t index);
+
 enum {
   EXEC_CACHE_ENTRIES = 1,
   EXEC_CACHE_MAX = 4 * 1024 * 1024,
+  VFS_DEV_EXT2_ROOT = 0x0801,
+  VFS_DEV_DEVFS = 0x0005,
+  VFS_DEV_PROC = 0x0006,
+  VFS_DEV_RAM0 = 0x0010,
+  VFS_DEV_TMPFS = 0x0011,
 };
 
 struct exec_cache_entry {
@@ -33,9 +41,81 @@ static bool starts_with(const char *s, const char *prefix) {
   return true;
 }
 
+static bool path_is_mount(const char *path, const char *mount) {
+  if (!starts_with(path, mount)) { return false; }
+  char next = path[kstrlen(mount)];
+  return next == '\0' || next == '/';
+}
+
+static bool ramfs_route(const char *path) {
+  return path_is_mount(path, "/dev") || path_is_mount(path, "/proc") || path_is_mount(path, "/tmp");
+}
+
+static bool same_ramfs_route(const char *a, const char *b) {
+  return (path_is_mount(a, "/dev") && path_is_mount(b, "/dev")) ||
+         (path_is_mount(a, "/proc") && path_is_mount(b, "/proc")) ||
+         (path_is_mount(a, "/tmp") && path_is_mount(b, "/tmp"));
+}
+
+static bool ramfs_device_is_block(enum ramfs_device device) {
+  return device == RAMFS_DEV_BLK_ROOT || device == RAMFS_DEV_BLK_BOOT;
+}
+
+static uint64_t make_rdev(uint64_t major, uint64_t minor) {
+  return (major << 8) | minor;
+}
+
+static uint64_t ramfs_mount_dev_id(enum ramfs_mount mount) {
+  switch (mount) {
+  case RAMFS_MOUNT_DEV:
+    return VFS_DEV_DEVFS;
+  case RAMFS_MOUNT_PROC:
+    return VFS_DEV_PROC;
+  case RAMFS_MOUNT_TMP:
+    return VFS_DEV_TMPFS;
+  case RAMFS_MOUNT_RAM0:
+    return VFS_DEV_RAM0;
+  }
+  return VFS_DEV_RAM0;
+}
+
+static uint64_t ramfs_device_rdev(enum ramfs_device device) {
+  switch (device) {
+  case RAMFS_DEV_NULL:
+    return make_rdev(1, 3);
+  case RAMFS_DEV_ZERO:
+    return make_rdev(1, 5);
+  case RAMFS_DEV_FULL:
+    return make_rdev(1, 7);
+  case RAMFS_DEV_RANDOM:
+    return make_rdev(1, 8);
+  case RAMFS_DEV_URANDOM:
+    return make_rdev(1, 9);
+  case RAMFS_DEV_CONSOLE:
+    return make_rdev(5, 1);
+  case RAMFS_DEV_TTY:
+    return make_rdev(5, 0);
+  case RAMFS_DEV_BLK_ROOT:
+    return make_rdev(254, 0);
+  case RAMFS_DEV_BLK_BOOT:
+    return make_rdev(254, 1);
+  default:
+    return 0;
+  }
+}
+
 static void from_ramfs(const struct ramfs_node *node, struct vfs_node *out) {
-  uint16_t mode = node->is_dir ? 0040777u : 0100666u;
-  if (node->device != RAMFS_DEV_NONE) { mode = 0020666u; }
+  uint16_t perms = node->mode == 0 ? (node->is_dir ? 0777u : 0666u) : (uint16_t)(node->mode & 07777u);
+  uint16_t mode = node->is_dir ? (uint16_t)(0040000u | perms) : (uint16_t)(0100000u | perms);
+  if (node->device != RAMFS_DEV_NONE) {
+    if (ramfs_device_is_block(node->device)) {
+      mode = (uint16_t)(0060000u | perms);
+    } else if (node->mount == RAMFS_MOUNT_PROC) {
+      mode = (uint16_t)(0100000u | perms);
+    } else {
+      mode = (uint16_t)(0020000u | perms);
+    }
+  }
   *out = (struct vfs_node){
     .backend = VFS_RAMFS,
     .ino = node->ino,
@@ -44,6 +124,8 @@ static void from_ramfs(const struct ramfs_node *node, struct vfs_node *out) {
     .device = node->device,
     .mode = mode,
     .links_count = 1,
+    .dev_id = ramfs_mount_dev_id(node->mount),
+    .rdev = ramfs_device_rdev(node->device),
     .size = node->size,
     .ramfs = *node,
   };
@@ -58,6 +140,8 @@ static void from_ext2(const struct ext2_node *node, struct vfs_node *out) {
     .device = RAMFS_DEV_NONE,
     .mode = node->mode,
     .links_count = node->links_count,
+    .dev_id = VFS_DEV_EXT2_ROOT,
+    .rdev = 0,
     .size = node->size,
     .ext2 = *node,
   };
@@ -74,6 +158,91 @@ static bool streq(const char *a, const char *b) {
     if (*a++ != *b++) { return false; }
   }
   return *a == '\0' && *b == '\0';
+}
+
+static bool parse_uint_component(const char **p, int *out) {
+  int value = 0;
+  const char *s = *p;
+  if (*s < '0' || *s > '9') { return false; }
+  while (*s >= '0' && *s <= '9') {
+    value = value * 10 + (*s - '0');
+    ++s;
+  }
+  *p = s;
+  *out = value;
+  return true;
+}
+
+static bool proc_kind_for_name(const char *name, enum ramfs_device *device) {
+  if (streq(name, "stat")) {
+    *device = RAMFS_DEV_PROC_PID_STAT;
+  } else if (streq(name, "status")) {
+    *device = RAMFS_DEV_PROC_PID_STATUS;
+  } else if (streq(name, "cmdline")) {
+    *device = RAMFS_DEV_PROC_PID_CMDLINE;
+  } else if (streq(name, "cwd")) {
+    *device = RAMFS_DEV_PROC_PID_CWD;
+  } else if (streq(name, "exe")) {
+    *device = RAMFS_DEV_PROC_PID_EXE;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+static void utoa_dec(uint64_t value, char *dst, size_t cap) {
+  char tmp[32];
+  size_t n = 0;
+  if (cap == 0) { return; }
+  if (value == 0) { tmp[n++] = '0'; }
+  while (value != 0 && n < sizeof(tmp)) {
+    tmp[n++] = (char)('0' + (value % 10));
+    value /= 10;
+  }
+  size_t out = 0;
+  while (n > 0 && out + 1 < cap) {
+    dst[out++] = tmp[--n];
+  }
+  dst[out] = '\0';
+}
+
+static bool lookup_proc_dynamic(const char *path, struct vfs_node *out) {
+  if (!path_is_mount(path, "/proc")) { return false; }
+  const char *p = path + 5;
+  if (*p != '/') { return false; }
+  ++p;
+  int pid = 0;
+  if (!parse_uint_component(&p, &pid) || !cell_proc_exists(pid)) { return false; }
+  if (*p == '\0') {
+    *out = (struct vfs_node){
+      .backend = VFS_PROC,
+      .ino = 100000u + (uint64_t)pid,
+      .is_dir = true,
+      .writable = false,
+      .device = RAMFS_DEV_NONE,
+      .mode = 0040555u,
+      .links_count = 1,
+      .dev_id = VFS_DEV_PROC,
+      .proc_pid = pid,
+    };
+    return true;
+  }
+  if (*p != '/') { return false; }
+  ++p;
+  enum ramfs_device device;
+  if (!proc_kind_for_name(p, &device)) { return false; }
+  *out = (struct vfs_node){
+    .backend = VFS_PROC,
+    .ino = 110000u + (uint64_t)pid * 8u + (uint64_t)device,
+    .is_dir = false,
+    .writable = false,
+    .device = device,
+    .mode = 0100444u,
+    .links_count = 1,
+    .dev_id = VFS_DEV_PROC,
+    .proc_pid = pid,
+  };
+  return true;
 }
 
 static void copy_path(char *dst, size_t cap, const char *src) {
@@ -131,7 +300,8 @@ static bool lookup_ramfs(const char *path, struct vfs_node *out) {
 }
 
 bool vfs_lookup(const char *path, struct vfs_node *out) {
-  if (starts_with(path, "/dev")) {
+  if (ramfs_route(path)) {
+    if (lookup_proc_dynamic(path, out)) { return true; }
     if (lookup_ramfs(path, out)) { return true; }
   }
   if (root_ext2 != NULL) {
@@ -177,7 +347,7 @@ bool vfs_lookup_exec(const char *path, const void **data, uint64_t *size) {
 }
 
 bool vfs_mkdir(const char *path) {
-  if (root_ext2 != NULL && !starts_with(path, "/dev")) {
+  if (root_ext2 != NULL && !ramfs_route(path)) {
     struct ext2_node node;
     bool ok = ext2_create(root_ext2, path, true, &node);
     if (ok) { invalidate_exec_cache(); }
@@ -187,7 +357,7 @@ bool vfs_mkdir(const char *path) {
 }
 
 bool vfs_create(const char *path, struct vfs_node *out) {
-  if (root_ext2 != NULL && !starts_with(path, "/dev")) {
+  if (root_ext2 != NULL && !ramfs_route(path)) {
     struct ext2_node node;
     if (!ext2_create(root_ext2, path, false, &node)) { return false; }
     from_ext2(&node, out);
@@ -213,7 +383,7 @@ bool vfs_truncate(const struct vfs_node *node, uint64_t size) {
 }
 
 bool vfs_unlink(const char *path) {
-  if (root_ext2 != NULL && !starts_with(path, "/dev")) {
+  if (root_ext2 != NULL && !ramfs_route(path)) {
     bool ok = ext2_unlink(root_ext2, path);
     if (ok) { invalidate_exec_cache(); }
     return ok;
@@ -222,31 +392,34 @@ bool vfs_unlink(const char *path) {
 }
 
 bool vfs_link(const char *old_path, const char *new_path) {
-  if (root_ext2 != NULL && !starts_with(old_path, "/dev") && !starts_with(new_path, "/dev")) {
+  if (root_ext2 != NULL && !ramfs_route(old_path) && !ramfs_route(new_path)) {
     bool ok = ext2_link(root_ext2, old_path, new_path);
     if (ok) { invalidate_exec_cache(); }
     return ok;
   }
+  if (root_ramfs != NULL && same_ramfs_route(old_path, new_path)) { return ramfs_link(root_ramfs, old_path, new_path); }
   return false;
 }
 
 bool vfs_chmod(const char *path, uint32_t mode) {
-  if (root_ext2 != NULL && !starts_with(path, "/dev")) { return ext2_chmod(root_ext2, path, mode); }
-  return root_ramfs != NULL && starts_with(path, "/dev");
+  if (root_ext2 != NULL && !ramfs_route(path)) { return ext2_chmod(root_ext2, path, mode); }
+  struct ramfs_node node;
+  return root_ramfs != NULL && ramfs_route(path) && ramfs_lookup_node(root_ramfs, path, &node) &&
+         ramfs_chmod_node(root_ramfs, node.index, (uint16_t)mode);
 }
 
 bool vfs_chmod_node(const struct vfs_node *node, uint32_t mode) {
   if (node->backend == VFS_EXT2) { return ext2_chmod_node(root_ext2, &node->ext2, mode); }
-  return node->backend == VFS_RAMFS;
+  return node->backend == VFS_RAMFS && ramfs_chmod_node(node->ramfs.fs, node->ramfs.index, (uint16_t)mode);
 }
 
 bool vfs_rename(const char *old_path, const char *new_path) {
-  if (root_ext2 != NULL && !starts_with(old_path, "/dev") && !starts_with(new_path, "/dev")) {
+  if (root_ext2 != NULL && !ramfs_route(old_path) && !ramfs_route(new_path)) {
     bool ok = ext2_rename(root_ext2, old_path, new_path);
     if (ok) { invalidate_exec_cache(); }
     return ok;
   }
-  return root_ramfs != NULL && ramfs_rename(root_ramfs, old_path, new_path);
+  return root_ramfs != NULL && same_ramfs_route(old_path, new_path) && ramfs_rename(root_ramfs, old_path, new_path);
 }
 
 uint64_t vfs_read(const struct vfs_node *node, uint64_t off, void *dst, uint64_t len) {
@@ -285,16 +458,43 @@ bool vfs_refresh(const struct vfs_node *node, struct vfs_node *out) {
     out->writable = true;
     return true;
   }
+  if (node->backend == VFS_PROC) {
+    *out = *node;
+    return cell_proc_exists(node->proc_pid);
+  }
   return false;
 }
 
 bool vfs_dirent(const struct vfs_node *dir, size_t index, struct vfs_dirent *out) {
+  if (dir->backend == VFS_PROC) {
+    static const char *names[] = {"stat", "status", "cmdline", "cwd", "exe"};
+    if (!dir->is_dir || index >= sizeof(names) / sizeof(names[0])) { return false; }
+    *out = (struct vfs_dirent){.ino = dir->ino + index + 1, .is_dir = false, .is_device = false};
+    kmemcpy(out->name, names[index], kstrlen(names[index]) + 1);
+    return true;
+  }
   if (dir->backend == VFS_RAMFS) {
     struct ramfs_dirent ent;
-    if (!ramfs_dirent(dir->ramfs.fs, dir->ramfs.index, index, &ent)) { return false; }
-    *out = (struct vfs_dirent){.ino = ent.ino, .is_dir = ent.is_dir, .is_device = ent.is_device};
-    kmemcpy(out->name, ent.name, kstrlen(ent.name) + 1);
-    return true;
+    if (ramfs_dirent(dir->ramfs.fs, dir->ramfs.index, index, &ent)) {
+      *out = (struct vfs_dirent){.ino = ent.ino, .is_dir = ent.is_dir, .is_device = ent.is_device};
+      kmemcpy(out->name, ent.name, kstrlen(ent.name) + 1);
+      return true;
+    }
+    if (dir->ramfs.mount == RAMFS_MOUNT_PROC && streq(dir->ramfs.name, "proc")) {
+      size_t static_count = 0;
+      while (ramfs_dirent(dir->ramfs.fs, dir->ramfs.index, static_count, &ent)) {
+        ++static_count;
+      }
+      if (index >= static_count) {
+        int pid = cell_proc_pid_at(index - static_count);
+        if (pid != 0) {
+          *out = (struct vfs_dirent){.ino = 100000u + (uint64_t)pid, .is_dir = true, .is_device = false};
+          utoa_dec((uint64_t)pid, out->name, sizeof(out->name));
+          return true;
+        }
+      }
+    }
+    return false;
   }
   if (dir->backend == VFS_EXT2) {
     struct ext2_dirent ent;

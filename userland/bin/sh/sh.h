@@ -19,6 +19,7 @@ enum {
 enum token_type {
   TOK_END,
   TOK_WORD,
+  TOK_BG,
   TOK_AND,
   TOK_OR,
   TOK_SEMI,
@@ -42,6 +43,7 @@ struct command {
   char *argv[ARG_CAP];
   int argc;
   struct redirs redir;
+  bool background;
 };
 
 struct parser {
@@ -51,6 +53,7 @@ struct parser {
 };
 
 int sh_read_line(char *buf, size_t cap);
+void sh_reap_jobs(bool verbose);
 int sh_tokenize(char *line, struct token *tokens, size_t *count, int last_status);
 enum token_type sh_parser_peek(struct parser *p);
 struct token *sh_parser_take(struct parser *p);

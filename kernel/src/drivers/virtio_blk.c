@@ -83,6 +83,9 @@ struct virtio_blk_req {
 
 static uint64_t hhdm;
 static uint64_t mmio_base;
+static uint64_t root_base;
+static uint64_t boot_base;
+static uint64_t active_base;
 static bool blk_ready;
 static uint64_t desc_pa;
 static uint64_t avail_pa;
@@ -133,6 +136,7 @@ static void write_pa_pair(uint64_t low_reg, uint64_t pa) {
 
 static bool setup_device(uint64_t base) {
   mmio_base = base;
+  active_base = base;
   write32(VIRTIO_MMIO_STATUS, 0);
   set_status(VIRTIO_STATUS_ACKNOWLEDGE);
   set_status(VIRTIO_STATUS_DRIVER);
@@ -148,15 +152,21 @@ static bool setup_device(uint64_t base) {
   set_status(VIRTIO_STATUS_FEATURES_OK);
   if ((read32(VIRTIO_MMIO_STATUS) & VIRTIO_STATUS_FEATURES_OK) == 0) { return false; }
 
-  desc_pa = alloc_zero_page((void **)&desc);
-  avail_pa = alloc_zero_page((void **)&avail);
-  used_pa = alloc_zero_page((void **)&used);
-  req_pa = alloc_zero_page((void **)&req);
-  sector_pa = alloc_zero_page((void **)&sector_buf);
-  status_pa = alloc_zero_page((void **)&status_buf);
+  if (desc_pa == 0) { desc_pa = alloc_zero_page((void **)&desc); }
+  if (avail_pa == 0) { avail_pa = alloc_zero_page((void **)&avail); }
+  if (used_pa == 0) { used_pa = alloc_zero_page((void **)&used); }
+  if (req_pa == 0) { req_pa = alloc_zero_page((void **)&req); }
+  if (sector_pa == 0) { sector_pa = alloc_zero_page((void **)&sector_buf); }
+  if (status_pa == 0) { status_pa = alloc_zero_page((void **)&status_buf); }
   if (desc_pa == 0 || avail_pa == 0 || used_pa == 0 || req_pa == 0 || sector_pa == 0 || status_pa == 0) {
     return false;
   }
+  kmemset(desc, 0, 4096);
+  kmemset(avail, 0, 4096);
+  kmemset((void *)used, 0, 4096);
+  kmemset(req, 0, 4096);
+  kmemset(sector_buf, 0, 4096);
+  *(uint8_t *)status_buf = 0;
 
   write32(VIRTIO_MMIO_QUEUE_SEL, 0);
   if (read32(VIRTIO_MMIO_QUEUE_NUM_MAX) < QUEUE_SIZE) { return false; }
@@ -171,6 +181,13 @@ static bool setup_device(uint64_t base) {
   set_status(VIRTIO_STATUS_DRIVER_OK);
   blk_ready = true;
   return true;
+}
+
+static bool select_device(uint64_t base) {
+  if (base == 0) { return false; }
+  if (blk_ready && active_base == base) { return true; }
+  blk_ready = false;
+  return setup_device(base);
 }
 
 static bool rw_sectors(uint64_t sector, void *buf, uint32_t bytes, bool write) {
@@ -221,7 +238,7 @@ static bool write_sector(uint64_t sector, const void *src) {
   return rw_sectors(sector, (void *)src, SECTOR_SIZE, true);
 }
 
-bool virtio_blk_read(uint64_t offset, void *dst, uint32_t len) {
+static bool read_active(uint64_t offset, void *dst, uint32_t len) {
   uint8_t *out = dst;
   while (len > 0) {
     uint64_t sector = offset / SECTOR_SIZE;
@@ -246,7 +263,11 @@ bool virtio_blk_read(uint64_t offset, void *dst, uint32_t len) {
   return true;
 }
 
-bool virtio_blk_write(uint64_t offset, const void *src, uint32_t len) {
+bool virtio_blk_read(uint64_t offset, void *dst, uint32_t len) {
+  return select_device(root_base) && read_active(offset, dst, len);
+}
+
+static bool write_active(uint64_t offset, const void *src, uint32_t len) {
   const uint8_t *in = src;
   while (len > 0) {
     uint64_t sector = offset / SECTOR_SIZE;
@@ -274,10 +295,22 @@ bool virtio_blk_write(uint64_t offset, const void *src, uint32_t len) {
   return true;
 }
 
+bool virtio_blk_write(uint64_t offset, const void *src, uint32_t len) {
+  return select_device(root_base) && write_active(offset, src, len);
+}
+
+bool virtio_blk_read_boot(uint64_t offset, void *dst, uint32_t len) {
+  if (!select_device(boot_base)) { return false; }
+  bool ok = read_active(offset, dst, len);
+  return select_device(root_base) && ok;
+}
+
 bool virtio_blk_init(uint64_t hhdm_offset) {
   hhdm = hhdm_offset;
   blk_ready = false;
-  uint64_t selected = 0;
+  root_base = 0;
+  boot_base = 0;
+  active_base = 0;
   for (uint32_t i = 0; i < VIRTIO_MMIO_SLOTS; ++i) {
     uint64_t base = VIRTIO_MMIO_BASE + (uint64_t)i * VIRTIO_MMIO_SLOT_SIZE;
     mmio_base = base;
@@ -288,21 +321,22 @@ bool virtio_blk_init(uint64_t hhdm_offset) {
         continue;
       }
       uint8_t super[128];
-      if (!virtio_blk_read(1024, super, sizeof(super))) {
+      if (!read_active(1024, super, sizeof(super))) {
         blk_ready = false;
         continue;
       }
       uint16_t magic = (uint16_t)super[56] | ((uint16_t)super[57] << 8);
       if (magic == 0xef53u) {
-        selected = base;
-        kprintf("[spore] virtio-blk: mmio %p ext2 magic 0x%x\n", (void *)(uintptr_t)selected, (unsigned)magic);
-        return true;
+        root_base = base;
+        kprintf("[spore] virtio-blk: mmio %p ext2 magic 0x%x\n", (void *)(uintptr_t)root_base, (unsigned)magic);
+        return select_device(root_base);
       }
+      if (boot_base == 0) { boot_base = base; }
       kprintf("[spore] virtio-blk: mmio %p skipped magic 0x%x\n", (void *)(uintptr_t)base, (unsigned)magic);
       blk_ready = false;
     }
   }
-  if (selected == 0) {
+  if (root_base == 0) {
     kprintf("[spore] virtio-blk: root disk not present\n");
     return false;
   }

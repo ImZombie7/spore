@@ -25,6 +25,16 @@ static volatile sig_atomic_t resize_pending;
 static const char *shell_commands[] = {
   "ls /bin\n",
   "ls /dev\n",
+  "ls /dev/fs\n",
+  "ls /dev/blk\n",
+  "ls /proc\n",
+  "cat /proc/procinfo\n",
+  "cat /proc/meminfo\n",
+  "cat /proc/mounts\n",
+  "cat /proc/filesystems\n",
+  "cat /proc/partitions\n",
+  "cat /proc/devices\n",
+  "stat /dev/null /dev/blk/root /proc/mounts /tmp\n",
   "echo null-ok > /dev/null\n",
   "echo console-ok > /dev/console\n",
   "echo full > /dev/full\n",
@@ -46,6 +56,13 @@ static const char *shell_commands[] = {
   "tar -tf /tmp/coreutils.tar\n",
   "ps\n",
   "top -b\n",
+  "sleep 1 &\n",
+  "jobs\n",
+  "cat /proc/1/status\n",
+  "cat /proc/1/cmdline\n",
+  "cat /proc/1/exe\n",
+  "wait\n",
+  "jobs\n",
   "df\n",
   "dirname /tmp/coreutils\n",
   "basename /tmp/coreutils\n",
@@ -53,6 +70,23 @@ static const char *shell_commands[] = {
   "uptime\n",
   "whoami\n",
   "hostname\n",
+  "hostid\n",
+  "id\n",
+  "who\n",
+  "tty\n",
+  "env FOO=bar printenv FOO\n",
+  "printf 'abc\\n' > /tmp/hashin\n",
+  "base64 /tmp/hashin > /tmp/hashin.b64\n",
+  "base64 -d /tmp/hashin.b64\n",
+  "cksum /tmp/hashin\n",
+  "sum /tmp/hashin\n",
+  "sha1sum /tmp/hashin\n",
+  "du -s /tmp\n",
+  "readlink -f /tmp/../tmp/hashin\n",
+  "time true\n",
+  "printf 'all:\\n\\techo mk-ok\\n' > /tmp/mkfile\n",
+  "mk -n -f /tmp/mkfile all\n",
+  "chroot / /bin/pwd\n",
   "cp /tmp/coreutils /tmp/coreutils.copy\n",
   "mv /tmp/coreutils.copy /tmp/coreutils.moved\n",
   "ln /tmp/coreutils /tmp/coreutils.link\n",
@@ -707,7 +741,7 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
         }
       }
       if (len > 0) {
-        if (!shell_size_sent && contains(buf, " $ ")) {
+        if (!shell_size_sent && contains(buf, " $")) {
           send_terminal_size(in_pipe[1]);
           shell_size_sent = true;
         }
@@ -716,8 +750,7 @@ static int run_harness(char **qemu_argv, const char *mode, bool timings, bool tm
           write(in_pipe[1], "z\n", 2);
           stdin_sent = true;
         }
-        if (strcmp(mode, "shell") == 0 && sent < sizeof(shell_commands) / sizeof(shell_commands[0]) &&
-            contains(buf, " $ ")) {
+        if (strcmp(mode, "shell") == 0 && sent < sizeof(shell_commands) / sizeof(shell_commands[0]) && contains(buf, " $")) {
           write(in_pipe[1], shell_commands[sent], strlen(shell_commands[sent]));
           ++sent;
           buf[0] = '\0';

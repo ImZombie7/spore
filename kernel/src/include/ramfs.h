@@ -6,9 +6,18 @@
 #include <stdint.h>
 
 enum {
-  RAMFS_MAX_NODES = 96,
+  RAMFS_MAX_NODES = 128,
   RAMFS_NAME_MAX = 31,
-  RAMFS_FILE_CAP = 8192,
+  RAMFS_FILE_CAP = 128 * 1024 * 1024,
+  RAMFS_PAGE_SIZE = 4096,
+  RAMFS_MAX_BACKING_PAGES = RAMFS_FILE_CAP / RAMFS_PAGE_SIZE,
+};
+
+enum ramfs_mount {
+  RAMFS_MOUNT_RAM0,
+  RAMFS_MOUNT_DEV,
+  RAMFS_MOUNT_PROC,
+  RAMFS_MOUNT_TMP,
 };
 
 enum ramfs_device {
@@ -20,23 +29,46 @@ enum ramfs_device {
   RAMFS_DEV_URANDOM,
   RAMFS_DEV_CONSOLE,
   RAMFS_DEV_TTY,
+  RAMFS_DEV_PROCINFO,
+  RAMFS_DEV_MEMINFO,
+  RAMFS_DEV_CPUINFO,
+  RAMFS_DEV_UPTIME,
+  RAMFS_DEV_MOUNTS,
+  RAMFS_DEV_STAT,
+  RAMFS_DEV_FILESYSTEMS,
+  RAMFS_DEV_PARTITIONS,
+  RAMFS_DEV_DEVICES,
+  RAMFS_DEV_PROC_PID_STAT,
+  RAMFS_DEV_PROC_PID_STATUS,
+  RAMFS_DEV_PROC_PID_CMDLINE,
+  RAMFS_DEV_PROC_PID_CWD,
+  RAMFS_DEV_PROC_PID_EXE,
+  RAMFS_DEV_FS_ROOT,
+  RAMFS_DEV_FS_BOOT,
+  RAMFS_DEV_FS_RAM0,
+  RAMFS_DEV_FS_TMP,
+  RAMFS_DEV_BLK_ROOT,
+  RAMFS_DEV_BLK_BOOT,
 };
 
 struct ramfs_mem_node {
   bool used;
   bool is_dir;
   bool writable;
+  enum ramfs_mount mount;
   enum ramfs_device device;
+  uint16_t mode;
+  int first_page;
   int parent;
   char name[RAMFS_NAME_MAX + 1];
   const void *ro_data;
-  uint8_t data[RAMFS_FILE_CAP];
   uint64_t size;
   uint64_t ino;
 };
 
 struct ramfs {
   struct ramfs_mem_node nodes[RAMFS_MAX_NODES];
+  uint64_t hhdm_offset;
   uint64_t next_ino;
 };
 
@@ -54,7 +86,9 @@ struct ramfs_node {
   uint64_t size;
   uint64_t ino;
   bool is_dir;
+  enum ramfs_mount mount;
   enum ramfs_device device;
+  uint16_t mode;
 };
 
 struct ramfs_dirent {
@@ -72,7 +106,9 @@ bool ramfs_dirent(const struct ramfs *fs, int dir_index, size_t index, struct ra
 bool ramfs_mkdir(struct ramfs *fs, const char *path);
 bool ramfs_create(struct ramfs *fs, const char *path, struct ramfs_node *out);
 bool ramfs_truncate(struct ramfs *fs, int index, uint64_t size);
+bool ramfs_chmod_node(struct ramfs *fs, int index, uint16_t mode);
 bool ramfs_unlink(struct ramfs *fs, const char *path);
+bool ramfs_link(struct ramfs *fs, const char *old_path, const char *new_path);
 bool ramfs_rename(struct ramfs *fs, const char *old_path, const char *new_path);
 uint64_t ramfs_read(struct ramfs *fs, int index, uint64_t off, void *dst, uint64_t len);
 int64_t ramfs_write(struct ramfs *fs, int index, uint64_t off, const void *src, uint64_t len);

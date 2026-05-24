@@ -1,34 +1,46 @@
 #include <spore.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/syscall.h>
-#include <unistd.h>
 
-static const char *state_name(uint32_t state) {
-  switch (state) {
-  case 1:
-    return "R";
-  case 2:
-    return "S";
-  case 3:
-    return "Z";
-  default:
-    return "?";
-  }
+struct proc_row {
+  unsigned pid;
+  unsigned ppid;
+  char state[16];
+  char wait[16];
+  unsigned long long rss_pages;
+  unsigned long long cpu_ticks;
+  unsigned long long age_ticks;
+  unsigned long long budget_remaining;
+  unsigned long long budget_max;
+  char name[32];
+  char exec_path[128];
+  char cwd[64];
+  char cmdline[160];
+};
+
+static char state_letter(const char *state) {
+  if (streq(state, "running")) { return 'R'; }
+  if (streq(state, "blocked")) { return 'S'; }
+  if (streq(state, "zombie")) { return 'Z'; }
+  return '?';
 }
 
 int main(void) {
-  struct proc_info infos[32];
-  long n = syscall(SYS_spore_procinfo, infos, sizeof(infos));
-  if (n < 0) {
+  FILE *f = fopen("/proc/procinfo", "r");
+  if (f == NULL) {
     perror("ps");
     return EXIT_FAILURE;
   }
-  if (n > (long)(sizeof(infos) / sizeof(infos[0]))) { n = (long)(sizeof(infos) / sizeof(infos[0])); }
-  puts("PID  TID  PPID  S  RSSP  CWD");
-  for (long i = 0; i < n; ++i) {
-    printf("%3u  %3u  %4u  %s  %4llu  %s\n", infos[i].pid, infos[i].tid, infos[i].ppid, state_name(infos[i].state),
-           (unsigned long long)infos[i].resident_pages, infos[i].cwd);
+  char header[160];
+  (void)fgets(header, sizeof(header), f);
+  puts("PID  PPID  S  WAIT    RSSP  CPU  TIME  CWD      CMD");
+  struct proc_row p;
+  while (fscanf(f, "%u %u %15s %15s %llu %llu %llu %llu %llu %31s %127s %63s %159[^\n]\n", &p.pid, &p.ppid, p.state,
+                p.wait, &p.rss_pages, &p.cpu_ticks, &p.age_ticks, &p.budget_remaining, &p.budget_max, p.name,
+                p.exec_path, p.cwd, p.cmdline) == 13) {
+    printf("%3u  %4u  %c  %-6s  %4llu  %3llu  %4llu  %-7s  %s\n", p.pid, p.ppid, state_letter(p.state), p.wait,
+           p.rss_pages, p.cpu_ticks, p.age_ticks, p.cwd, p.cmdline);
   }
+  fclose(f);
   return EXIT_SUCCESS;
 }

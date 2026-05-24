@@ -49,10 +49,16 @@ run: runner run-root
 	fi
 
 run-tests: runner test-run-root
-	$(QEMU_RUNNER) --mode filter --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/test_image.img" --root "$(TEST_RUN_ROOT)"
+	@root="$$(mktemp "$(BUILD_DIR)/run-tests-root.XXXXXX.ext2")"; \
+	cp -f "$(BUILD_DIR)/test_root.ext2" "$$root"; \
+	trap 'rm -f "$$root"' EXIT INT TERM; \
+	$(QEMU_RUNNER) --mode filter --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/test_image.img" --root "$$root"
 
 run-shell-check: runner run-root
-	$(QEMU_RUNNER) --mode shell --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/image.img" --root "$(RUN_ROOT)"
+	@root="$$(mktemp "$(BUILD_DIR)/run-shell-root.XXXXXX.ext2")"; \
+	cp -f "$(BUILD_DIR)/root.ext2" "$$root"; \
+	trap 'rm -f "$$root"' EXIT INT TERM; \
+	$(QEMU_RUNNER) --mode shell --vars "$(EDK2_VARS)" --image "$(BUILD_DIR)/image.img" --root "$$root"
 
 format:
 	find bootloader kernel tests userland -type f \( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' -o -name '*.hpp' \) -print0 | xargs -0 $(CLANG_FORMAT) -i

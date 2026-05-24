@@ -9,6 +9,67 @@
 
 static struct token parse_tokens[TOKEN_CAP];
 
+enum { JOB_CAP = 16 };
+
+struct job {
+  pid_t pid;
+  int status;
+  bool running;
+  bool reported;
+  char cmd[128];
+};
+
+static struct job jobs[JOB_CAP];
+
+static const char *command_name(char **argv) {
+  return argv != NULL && argv[0] != NULL ? argv[0] : "?";
+}
+
+static void remember_job(pid_t pid, char **argv) {
+  for (size_t i = 0; i < JOB_CAP; ++i) {
+    if (jobs[i].pid == 0 || (!jobs[i].running && jobs[i].reported)) {
+      jobs[i] = (struct job){.pid = pid, .running = true};
+      snprintf(jobs[i].cmd, sizeof(jobs[i].cmd), "%s", command_name(argv));
+      printf("[%zu] %d\n", i + 1, (int)pid);
+      return;
+    }
+  }
+  printf("[?] %d\n", (int)pid);
+}
+
+static struct job *find_job_pid(pid_t pid) {
+  for (size_t i = 0; i < JOB_CAP; ++i) {
+    if (jobs[i].pid == pid) { return &jobs[i]; }
+  }
+  return NULL;
+}
+
+static struct job *find_job_spec(const char *spec) {
+  if (spec == NULL) { return NULL; }
+  if (spec[0] == '%') {
+    long n = strtol(spec + 1, NULL, 10);
+    if (n > 0 && n <= JOB_CAP && jobs[n - 1].pid != 0) { return &jobs[n - 1]; }
+    return NULL;
+  }
+  return find_job_pid((pid_t)strtol(spec, NULL, 10));
+}
+
+void sh_reap_jobs(bool verbose) {
+  int status = 0;
+  for (;;) {
+    pid_t pid = waitpid(-1, &status, WNOHANG);
+    if (pid <= 0) { return; }
+    struct job *job = find_job_pid(pid);
+    if (job == NULL) { continue; }
+    job->status = status;
+    job->running = false;
+    if (verbose && !job->reported) {
+      printf("[%ld] done %d %s\n", (long)(job - jobs + 1), (int)pid, job->cmd);
+      job->reported = true;
+    }
+  }
+}
+
 static int apply_redirs(const struct redirs *redir) {
   if (redir->in != NULL) {
     close(STDIN_FILENO);
@@ -61,6 +122,11 @@ static int wait_status(pid_t pid) {
   return 128;
 }
 
+static int status_code(int status) {
+  if (WIFEXITED(status)) { return WEXITSTATUS(status); }
+  return 128;
+}
+
 static int run_external(struct command *cmd) {
   pid_t pid = fork();
   if (pid < 0) {
@@ -75,6 +141,10 @@ static int run_external(struct command *cmd) {
     exec_search(cmd->argv);
     fprintf(stderr, "%s: not found\n", cmd->argv[0]);
     _exit(127);
+  }
+  if (cmd->background) {
+    remember_job(pid, cmd->argv);
+    return 0;
   }
   return wait_status(pid);
 }
@@ -129,9 +199,42 @@ static int run_builtin(struct command *cmd, int last_status, bool *handled) {
   }
   if (streq(cmd->argv[0], "exit")) { exit(cmd->argc > 1 ? atoi(cmd->argv[1]) : 0); }
   if (streq(cmd->argv[0], "help")) {
-    puts("builtins: cd pwd exit help export confine runc");
-    puts("syntax: words quotes $VAR $? ; && || < > >>");
+    puts("builtins: cd pwd exit help export jobs wait fg confine runc");
+    puts("syntax: words quotes $VAR $? ; && || & < > >>");
     return 0;
+  }
+  if (streq(cmd->argv[0], "jobs")) {
+    sh_reap_jobs(false);
+    for (size_t i = 0; i < JOB_CAP; ++i) {
+      if (jobs[i].pid == 0) { continue; }
+      printf("[%zu] %s %d %s\n", i + 1, jobs[i].running ? "running" : "done", (int)jobs[i].pid, jobs[i].cmd);
+      if (!jobs[i].running) { jobs[i].reported = true; }
+    }
+    return 0;
+  }
+  if (streq(cmd->argv[0], "wait") || streq(cmd->argv[0], "fg")) {
+    if (cmd->argc > 1) {
+      struct job *job = find_job_spec(cmd->argv[1]);
+      if (job == NULL) {
+        fprintf(stderr, "%s: no such job: %s\n", cmd->argv[0], cmd->argv[1]);
+        return 1;
+      }
+      if (!job->running) {
+        job->reported = true;
+        return status_code(job->status);
+      }
+      int status = wait_status(job->pid);
+      job->running = false;
+      job->reported = true;
+      return status;
+    }
+    int rc = 0;
+    for (size_t i = 0; i < JOB_CAP; ++i) {
+      if (jobs[i].pid != 0 && jobs[i].running) { rc = wait_status(jobs[i].pid); }
+      jobs[i].running = false;
+      jobs[i].reported = true;
+    }
+    return rc;
   }
   if (streq(cmd->argv[0], "export")) {
     for (int i = 1; i < cmd->argc; ++i) {
@@ -170,6 +273,7 @@ int sh_execute_line(char *line, int last_status) {
   while (sh_parser_peek(&parser) != TOK_END) {
     struct command cmd;
     if (sh_parse_command(&parser, &cmd) != 0) { return 2; }
+    if (sh_parser_peek(&parser) == TOK_BG) { cmd.background = true; }
 
     bool should_run =
       previous == TOK_SEMI || (previous == TOK_AND && status == 0) || (previous == TOK_OR && status != 0);
@@ -180,11 +284,12 @@ int sh_execute_line(char *line, int last_status) {
     }
 
     enum token_type next = sh_parser_peek(&parser);
-    if (next == TOK_AND || next == TOK_OR || next == TOK_SEMI) {
+    if (next == TOK_AND || next == TOK_OR || next == TOK_SEMI || next == TOK_BG) {
       previous = sh_parser_take(&parser)->type;
     } else {
       previous = TOK_SEMI;
     }
+    if (previous == TOK_BG) { previous = TOK_SEMI; }
   }
   return status;
 }

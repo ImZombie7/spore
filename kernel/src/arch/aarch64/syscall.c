@@ -33,6 +33,7 @@ enum {
   SYS_FTRUNCATE = 46,
   SYS_CHDIR = 49,
   SYS_FCHDIR = 50,
+  SYS_CHROOT = 51,
   SYS_OPENAT = 56,
   SYS_CLOSE = 57,
   SYS_GETDENTS64 = 61,
@@ -388,8 +389,24 @@ static bool normalize_path(const char *base, const char *path, char *out, size_t
 static bool copy_resolved_path(uint64_t path_addr, char *out, size_t cap) {
   path_policy_denied = false;
   char raw[128];
-  if (!copy_string_from_user(path_addr, raw, sizeof(raw)) || !normalize_path(cell_current_cwd(), raw, out, cap)) {
+  char virtual_path[128];
+  if (!copy_string_from_user(path_addr, raw, sizeof(raw)) ||
+      !normalize_path(cell_current_cwd(), raw, virtual_path, sizeof(virtual_path))) {
     return false;
+  }
+  const char *chroot = cell_current_chroot();
+  if (streq(chroot, "/")) {
+    if (kstrlen(virtual_path) >= cap) { return false; }
+    kmemcpy(out, virtual_path, kstrlen(virtual_path) + 1);
+  } else if (streq(virtual_path, "/")) {
+    if (kstrlen(chroot) >= cap) { return false; }
+    kmemcpy(out, chroot, kstrlen(chroot) + 1);
+  } else {
+    size_t root_len = kstrlen(chroot);
+    size_t path_len = kstrlen(virtual_path);
+    if (root_len + path_len >= cap) { return false; }
+    kmemcpy(out, chroot, root_len);
+    kmemcpy(out + root_len, virtual_path, path_len + 1);
   }
   const char *root = cell_current_fs_root();
   if (!streq(root, "/")) {
@@ -402,9 +419,35 @@ static bool copy_resolved_path(uint64_t path_addr, char *out, size_t cap) {
   return true;
 }
 
-static bool copy_exec_path(uint64_t path_addr, char *out, size_t cap) {
+static bool copy_virtual_path(uint64_t path_addr, char *out, size_t cap) {
   char raw[128];
   return copy_string_from_user(path_addr, raw, sizeof(raw)) && normalize_path(cell_current_cwd(), raw, out, cap);
+}
+
+static bool copy_exec_path(uint64_t path_addr, char *out, size_t cap) {
+  char raw[128];
+  char virtual_path[128];
+  if (!copy_string_from_user(path_addr, raw, sizeof(raw)) ||
+      !normalize_path(cell_current_cwd(), raw, virtual_path, sizeof(virtual_path))) {
+    return false;
+  }
+  const char *chroot = cell_current_chroot();
+  if (streq(chroot, "/")) {
+    if (kstrlen(virtual_path) >= cap) { return false; }
+    kmemcpy(out, virtual_path, kstrlen(virtual_path) + 1);
+    return true;
+  }
+  if (streq(virtual_path, "/")) {
+    if (kstrlen(chroot) >= cap) { return false; }
+    kmemcpy(out, chroot, kstrlen(chroot) + 1);
+    return true;
+  }
+  size_t root_len = kstrlen(chroot);
+  size_t path_len = kstrlen(virtual_path);
+  if (root_len + path_len >= cap) { return false; }
+  kmemcpy(out, chroot, root_len);
+  kmemcpy(out + root_len, virtual_path, path_len + 1);
+  return true;
 }
 
 static bool copy_string_array_from_user(uint64_t user, char store[][MAX_EXEC_STRING], const char *ptrs[],
@@ -725,7 +768,7 @@ static int64_t sys_execve(struct trap_frame *frame, uint64_t path_addr, uint64_t
     return -(int64_t)EINVAL;
   }
   kprintf("[spore] execve %s\n", path);
-  return cell_exec_replace(&new_as, &new_vmas, elf.runtime_entry, user_sp, frame) ? 0 : -12;
+  return cell_exec_replace(&new_as, &new_vmas, elf.runtime_entry, user_sp, frame, path, argv, argc) ? 0 : -12;
 }
 
 static int64_t sys_openat(uint64_t dirfd, uint64_t path_addr, uint64_t flags) {
@@ -747,9 +790,11 @@ static int64_t sys_openat(uint64_t dirfd, uint64_t path_addr, uint64_t flags) {
 
 static void fill_stat(struct stat64_aarch64 *st, const struct vfs_node *node) {
   kmemset(st, 0, sizeof(*st));
+  st->st_dev = node->dev_id;
   st->st_ino = node->ino;
   st->st_mode = node->mode;
   st->st_nlink = node->links_count == 0 ? 1 : node->links_count;
+  st->st_rdev = node->rdev;
   st->st_size = (int64_t)node->size;
   st->st_blksize = PAGE_SIZE;
   st->st_blocks = (int64_t)((node->size + 511) / 512);
@@ -819,6 +864,19 @@ static int64_t sys_getcwd(uint64_t buf, uint64_t len) {
 }
 
 static int64_t sys_chdir(uint64_t path_addr) {
+  char virtual_path[128];
+  char path[128];
+  if (!copy_virtual_path(path_addr, virtual_path, sizeof(virtual_path)) ||
+      !copy_resolved_path(path_addr, path, sizeof(path))) {
+    return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
+  }
+  struct vfs_node node;
+  if (!vfs_lookup(path, &node)) { return -(int64_t)ENOENT; }
+  if (!node.is_dir) { return -(int64_t)ENOTDIR; }
+  return cell_set_cwd(virtual_path) ? 0 : -(int64_t)ENAMETOOLONG;
+}
+
+static int64_t sys_chroot(uint64_t path_addr) {
   char path[128];
   if (!copy_resolved_path(path_addr, path, sizeof(path))) {
     return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
@@ -826,7 +884,8 @@ static int64_t sys_chdir(uint64_t path_addr) {
   struct vfs_node node;
   if (!vfs_lookup(path, &node)) { return -(int64_t)ENOENT; }
   if (!node.is_dir) { return -(int64_t)ENOTDIR; }
-  return cell_set_cwd(path) ? 0 : -(int64_t)ENAMETOOLONG;
+  if (!cell_set_chroot(path) || !cell_set_cwd("/")) { return -(int64_t)ENAMETOOLONG; }
+  return 0;
 }
 
 static int64_t sys_mkdirat(uint64_t dirfd, uint64_t path_addr) {
@@ -1022,7 +1081,94 @@ static void system_poweroff(void) {
   }
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgnu-label-as-value"
 static int64_t dispatch(struct trap_frame *f) {
+  static const void *linux_dispatch[] = {
+    [SYS_GETCWD] = &&l_getcwd,
+    [SYS_DUP] = &&l_dup,
+    [SYS_DUP3] = &&l_dup3,
+    [SYS_FCNTL] = &&l_fcntl,
+    [SYS_IOCTL] = &&l_ioctl,
+    [SYS_MKDIRAT] = &&l_mkdirat,
+    [SYS_LINKAT] = &&l_linkat,
+    [SYS_UNLINKAT] = &&l_unlinkat,
+    [SYS_RENAMEAT] = &&l_renameat,
+    [SYS_FTRUNCATE] = &&l_ftruncate,
+    [SYS_CHDIR] = &&l_chdir,
+    [SYS_FCHDIR] = &&l_fchdir,
+    [SYS_CHROOT] = &&l_chroot,
+    [SYS_FCHMOD] = &&l_fchmod,
+    [SYS_FCHMODAT] = &&l_fchmodat,
+    [SYS_OPENAT] = &&l_openat,
+    [SYS_CLOSE] = &&l_close,
+    [SYS_GETDENTS64] = &&l_getdents64,
+    [SYS_LSEEK] = &&l_lseek,
+    [SYS_READ] = &&l_read,
+    [SYS_WRITE] = &&l_write,
+    [SYS_READV] = &&l_readv,
+    [SYS_WRITEV] = &&l_writev,
+    [SYS_READLINKAT] = &&l_readlinkat,
+    [SYS_NEWFSTATAT] = &&l_newfstatat,
+    [SYS_FSTAT] = &&l_fstat,
+    [SYS_FSYNC] = &&l_fsync,
+    [SYS_EXIT] = &&l_exit,
+    [SYS_EXIT_GROUP] = &&l_exit_group,
+    [SYS_SET_TID_ADDRESS] = &&l_set_tid_address,
+    [SYS_FUTEX] = &&l_futex,
+    [SYS_SET_ROBUST_LIST] = &&l_set_robust_list,
+    [SYS_NANOSLEEP] = &&l_zero,
+    [SYS_CLOCK_GETTIME] = &&l_clock_gettime,
+    [SYS_CLOCK_NANOSLEEP] = &&l_zero,
+    [SYS_SCHED_GETAFFINITY] = &&l_sched_getaffinity,
+    [SYS_SCHED_YIELD] = &&l_sched_yield,
+    [SYS_KILL] = &&l_kill,
+    [SYS_TGKILL] = &&l_tgkill,
+    [SYS_RT_SIGACTION] = &&l_zero,
+    [SYS_RT_SIGPROCMASK] = &&l_zero,
+    [SYS_UNAME] = &&l_uname,
+    [SYS_GETPID] = &&l_getpid,
+    [SYS_GETPPID] = &&l_getppid,
+    [SYS_GETUID] = &&l_zero,
+    [SYS_GETEUID] = &&l_zero,
+    [SYS_GETGID] = &&l_zero,
+    [SYS_GETEGID] = &&l_zero,
+    [SYS_GETTID] = &&l_gettid,
+    [SYS_SYSINFO] = &&l_sysinfo,
+    [SYS_SOCKET] = &&l_socket,
+    [SYS_BIND] = &&l_bind,
+    [SYS_LISTEN] = &&l_enosys,
+    [SYS_ACCEPT] = &&l_enosys,
+    [SYS_CONNECT] = &&l_connect,
+    [SYS_GETSOCKNAME] = &&l_getsockname,
+    [SYS_SENDTO] = &&l_sendto,
+    [SYS_RECVFROM] = &&l_recvfrom,
+    [SYS_SETSOCKOPT] = &&l_zero,
+    [SYS_BRK] = &&l_brk,
+    [SYS_MUNMAP] = &&l_munmap,
+    [SYS_MREMAP] = &&l_mremap,
+    [SYS_CLONE] = &&l_clone,
+    [SYS_EXECVE] = &&l_execve,
+    [SYS_MMAP] = &&l_mmap,
+    [SYS_MPROTECT] = &&l_mprotect,
+    [SYS_MADVISE] = &&l_madvise,
+    [SYS_WAIT4] = &&l_wait4,
+    [SYS_PRLIMIT64] = &&l_prlimit64,
+    [SYS_RENAMEAT2] = &&l_renameat2,
+    [SYS_GETRANDOM] = &&l_getrandom,
+    [SYS_CLONE3] = &&l_enosys,
+  };
+  static const void *spore_dispatch[] = {
+    [SYS_SPORE_SNAPSHOT - SYS_SPORE_SNAPSHOT] = &&l_spore_snapshot,
+    [SYS_SPORE_SPAWN - SYS_SPORE_SNAPSHOT] = &&l_spore_spawn,
+    [SYS_SPORE_REAP - SYS_SPORE_SNAPSHOT] = &&l_spore_reap,
+    [SYS_SPORE_RESIDENT - SYS_SPORE_SNAPSHOT] = &&l_spore_resident,
+    [SYS_SPORE_SET_BUDGET - SYS_SPORE_SNAPSHOT] = &&l_spore_set_budget,
+    [SYS_SPORE_APPLY_POLICY - SYS_SPORE_SNAPSHOT] = &&l_spore_apply_policy,
+    [SYS_SPORE_SHUTDOWN - SYS_SPORE_SNAPSHOT] = &&l_spore_shutdown,
+    [SYS_SPORE_PROCINFO - SYS_SPORE_SNAPSHOT] = &&l_spore_procinfo,
+    [SYS_SPORE_FSINFO - SYS_SPORE_SNAPSHOT] = &&l_spore_fsinfo,
+  };
   uint64_t nr = f->x[8];
   uint64_t a0 = f->x[0];
   uint64_t a1 = f->x[1];
@@ -1036,203 +1182,210 @@ static int64_t dispatch(struct trap_frame *f) {
     return -(int64_t)EPERM;
   }
 
-  switch (nr) {
-  case SYS_SCHED_YIELD:
-    cell_schedule(f);
-    return SYSCALL_SWITCHED;
-  case SYS_READ:
-    return sys_read(f, a0, a1, a2);
-  case SYS_WRITE:
-    return sys_write(a0, a1, a2);
-  case SYS_READV:
-    return sys_readv(a0, a1, a2);
-  case SYS_WRITEV:
-    return sys_writev(a0, a1, a2);
-  case SYS_EXIT:
-    kprintf("[kernel] exit(%d)\n", (int)a0);
-    cell_exit_thread_current((int)a0, f);
-    return SYSCALL_SWITCHED;
-  case SYS_EXIT_GROUP:
-    kprintf("[kernel] exit_group(%d)\n", (int)a0);
-    cell_exit_group_current((int)a0, f);
-    return SYSCALL_SWITCHED;
-  case SYS_GETPID:
-    return cell_current_pid();
-  case SYS_GETPPID:
-    return cell_current_ppid();
-  case SYS_GETTID:
-    return cell_current_tid();
-  case SYS_GETUID:
-  case SYS_GETEUID:
-  case SYS_GETGID:
-  case SYS_GETEGID:
-    return 0;
-  case SYS_CLONE:
-    return sys_clone(f, a0, a1, a2, a3, a4);
-  case SYS_FUTEX: {
-    int64_t rc = sys_futex(f, a0, a1, a2, a3);
-    return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
+  if (nr < sizeof(linux_dispatch) / sizeof(linux_dispatch[0]) && linux_dispatch[nr] != NULL) {
+    goto *linux_dispatch[nr];
   }
-  case SYS_EXECVE:
-    return sys_execve(f, a0, a1, a2);
-  case SYS_CLONE3:
-    return -(int64_t)ENOSYS;
-  case SYS_WAIT4: {
-    int rc = cell_wait4((int)a0, a1, f);
-    return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
+  if (nr >= SYS_SPORE_SNAPSHOT) {
+    uint64_t spore_index = nr - SYS_SPORE_SNAPSHOT;
+    if (spore_index < sizeof(spore_dispatch) / sizeof(spore_dispatch[0]) && spore_dispatch[spore_index] != NULL) {
+      goto *spore_dispatch[spore_index];
+    }
   }
-  case SYS_KILL:
-  case SYS_TGKILL:
-    return cell_kill((int)(nr == SYS_TGKILL ? a1 : a0), (int)(nr == SYS_TGKILL ? a2 : a1));
-  case SYS_SPORE_SNAPSHOT:
-    return snapshot_create_current();
-  case SYS_SPORE_SPAWN:
-    return snapshot_spawn((int)a0, a1, a2, f);
-  case SYS_SPORE_REAP: {
-    int rc = snapshot_reap((int)a0, a1, f);
-    return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
-  }
-  case SYS_SPORE_RESIDENT:
-    return (int64_t)cell_resident_pages(a0, a0 + a1);
-  case SYS_SPORE_SET_BUDGET:
-    return cell_set_budget((int)a0, a1);
-  case SYS_SPORE_APPLY_POLICY: {
-    char manifest[64];
-    if (!copy_string_from_user(a0, manifest, sizeof(manifest))) { return -(int64_t)EFAULT; }
-    int rc = cell_apply_policy(manifest);
-    return rc == 0 ? 0 : -(int64_t)EPERM;
-  }
-  case SYS_SPORE_SHUTDOWN:
-    kprintf("[kernel] shutdown\n");
-    system_poweroff();
-    return 0;
-  case SYS_SPORE_PROCINFO: {
-    size_t max = a1 / sizeof(struct proc_info);
-    if (a0 == 0 || max == 0) { return (int64_t)cell_proc_info(NULL, 0); }
-    struct proc_info infos[MAX_THREADS];
-    size_t count = cell_proc_info(infos, max);
-    size_t copy = count < max ? count : max;
-    return user_writable(a0, copy * sizeof(infos[0])) &&
-               vmm_copy_to_user(active_as(), a0, infos, copy * sizeof(infos[0]))
-             ? (int64_t)count
-             : -(int64_t)EFAULT;
-  }
-  case SYS_SPORE_FSINFO: {
-    struct vfs_fs_info raw;
-    if (!vfs_fs_info(&raw)) { return -(int64_t)EINVAL; }
-    struct fs_info64 info = {
-      .block_size = raw.block_size,
-      .block_count = raw.block_count,
-      .free_blocks = raw.free_blocks,
-      .inode_count = raw.inode_count,
-      .free_inodes = raw.free_inodes,
-    };
-    return user_writable(a0, sizeof(info)) && vmm_copy_to_user(active_as(), a0, &info, sizeof(info)) ? 0
-                                                                                                     : -(int64_t)EFAULT;
-  }
-  case SYS_BRK:
-    return sys_brk(a0);
-  case SYS_MMAP:
-    return sys_mmap(a0, a1, a2, a3, a4, a5);
-  case SYS_MUNMAP:
-    return sys_munmap(a0, a1);
-  case SYS_MPROTECT:
-    return sys_mprotect(a0, a1, a2);
-  case SYS_MADVISE:
-    return sys_madvise(a0, a1, a2);
-  case SYS_MREMAP:
-    return sys_mremap(a0, a1, a2, a3);
-  case SYS_SOCKET:
-    return sys_socket(a0, a1, a2);
-  case SYS_BIND:
-    return sys_bind(a0, a1, a2);
-  case SYS_CONNECT:
-    return sys_connect(a0, a1, a2);
-  case SYS_SENDTO:
-    return sys_sendto(a0, a1, a2, a3, a4, a5);
-  case SYS_RECVFROM:
-    return sys_recvfrom(f, a0, a1, a2, a3, a4, a5);
-  case SYS_GETSOCKNAME:
-    return sys_getsockname(a0, a1, a2);
-  case SYS_SETSOCKOPT:
-    return 0;
-  case SYS_LISTEN:
-  case SYS_ACCEPT:
-    return -(int64_t)ENOSYS;
-  case SYS_OPENAT:
-    return sys_openat(a0, a1, a2);
-  case SYS_CLOSE:
-    return cell_fd_close((int)a0);
-  case SYS_LSEEK:
-    return cell_fd_lseek((int)a0, (int64_t)a1, (int)a2);
-  case SYS_FSTAT:
-    return sys_fstat(a0, a1);
-  case SYS_NEWFSTATAT:
-    return sys_newfstatat(a0, a1, a2);
-  case SYS_GETDENTS64:
-    return sys_getdents64(a0, a1, a2);
-  case SYS_READLINKAT:
-    return -(int64_t)EINVAL;
-  case SYS_DUP:
-    return cell_fd_dup((int)a0, 0);
-  case SYS_DUP3:
-    return cell_fd_dup((int)a0, (int)a1);
-  case SYS_FCNTL:
-    if (a1 == F_DUPFD) { return cell_fd_dup((int)a0, (int)a2); }
-    if (a1 == F_GETFL || a1 == F_SETFL) { return 0; }
-    return -(int64_t)EINVAL;
-  case SYS_GETCWD:
-    return sys_getcwd(a0, a1);
-  case SYS_PRLIMIT64:
-    return a3 == 0 ? 0 : zero_user(a3, 128);
-  case SYS_SYSINFO:
-    return zero_user(a0 == 0 ? a2 : a0, 128);
-  case SYS_UNAME:
-    return sys_uname(a0);
-  case SYS_SET_ROBUST_LIST:
-    return cell_set_robust_list_current(a0);
-  case SYS_RT_SIGACTION:
-  case SYS_RT_SIGPROCMASK:
-  case SYS_NANOSLEEP:
-  case SYS_CLOCK_NANOSLEEP:
-    return 0;
-  case SYS_SCHED_GETAFFINITY:
-    return sys_sched_getaffinity(a2, a1);
-  case SYS_SET_TID_ADDRESS:
-    return cell_set_tid_address_current(a0);
-  case SYS_IOCTL:
-    return sys_ioctl(a0, a1, a2);
-  case SYS_MKDIRAT:
-    return sys_mkdirat(a0, a1);
-  case SYS_LINKAT:
-    return sys_linkat(a0, a1, a2, a3, a4);
-  case SYS_UNLINKAT:
-    return sys_unlinkat(a0, a1);
-  case SYS_RENAMEAT:
-    return sys_renameat(a0, a1, a2, a3);
-  case SYS_RENAMEAT2:
-    return a4 == 0 ? sys_renameat(a0, a1, a2, a3) : -(int64_t)EINVAL;
-  case SYS_FCHMOD:
-    return sys_fchmod(a0, a1);
-  case SYS_FCHMODAT:
-    return sys_fchmodat(a0, a1, a2, a3);
-  case SYS_FTRUNCATE:
-    return sys_ftruncate(a0, a1);
-  case SYS_CHDIR:
-    return sys_chdir(a0);
-  case SYS_FCHDIR:
-    return cell_fd_is_dir((int)a0) ? 0 : -(int64_t)ENOTDIR;
-  case SYS_FSYNC:
-    return 0;
-  case SYS_GETRANDOM:
-    return sys_getrandom(a0, a1);
-  case SYS_CLOCK_GETTIME:
-    return sys_clock_gettime(a0, a1);
-  default:
-    kprintf("[kernel] syscall %d ENOSYS\n", (int)nr);
-    return -(int64_t)ENOSYS;
-  }
+  goto l_unknown;
+
+l_sched_yield:
+  cell_schedule(f);
+  return SYSCALL_SWITCHED;
+l_read:
+  return sys_read(f, a0, a1, a2);
+l_write:
+  return sys_write(a0, a1, a2);
+l_readv:
+  return sys_readv(a0, a1, a2);
+l_writev:
+  return sys_writev(a0, a1, a2);
+l_exit:
+  kprintf("[kernel] exit(%d)\n", (int)a0);
+  cell_exit_thread_current((int)a0, f);
+  return SYSCALL_SWITCHED;
+l_exit_group:
+  kprintf("[kernel] exit_group(%d)\n", (int)a0);
+  cell_exit_group_current((int)a0, f);
+  return SYSCALL_SWITCHED;
+l_getpid:
+  return cell_current_pid();
+l_getppid:
+  return cell_current_ppid();
+l_gettid:
+  return cell_current_tid();
+l_zero:
+  return 0;
+l_clone:
+  return sys_clone(f, a0, a1, a2, a3, a4);
+l_futex: {
+  int64_t rc = sys_futex(f, a0, a1, a2, a3);
+  return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
 }
+l_execve:
+  return sys_execve(f, a0, a1, a2);
+l_wait4: {
+  int rc = cell_wait4_options((int)a0, a1, (int)a2, f);
+  return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
+}
+l_kill:
+  if ((int)a0 == cell_current_pid() && ((int)a1 == 2 || (int)a1 == 9 || (int)a1 == 15)) {
+    cell_exit_group_current(128 + (int)a1, f);
+    return SYSCALL_SWITCHED;
+  }
+  return cell_kill((int)a0, (int)a1);
+l_tgkill:
+  if ((int)a1 == cell_current_pid() && ((int)a2 == 2 || (int)a2 == 9 || (int)a2 == 15)) {
+    cell_exit_group_current(128 + (int)a2, f);
+    return SYSCALL_SWITCHED;
+  }
+  return cell_kill((int)a1, (int)a2);
+l_spore_snapshot:
+  return snapshot_create_current();
+l_spore_spawn:
+  return snapshot_spawn((int)a0, a1, a2, f);
+l_spore_reap: {
+  int rc = snapshot_reap((int)a0, a1, f);
+  return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
+}
+l_spore_resident:
+  return (int64_t)cell_resident_pages(a0, a0 + a1);
+l_spore_set_budget:
+  return cell_set_budget((int)a0, a1);
+l_spore_apply_policy: {
+  char manifest[64];
+  if (!copy_string_from_user(a0, manifest, sizeof(manifest))) { return -(int64_t)EFAULT; }
+  int rc = cell_apply_policy(manifest);
+  return rc == 0 ? 0 : -(int64_t)EPERM;
+}
+l_spore_shutdown:
+  kprintf("[kernel] shutdown\n");
+  system_poweroff();
+  return 0;
+l_spore_procinfo: {
+  size_t max = a1 / sizeof(struct proc_info);
+  if (a0 == 0 || max == 0) { return (int64_t)cell_proc_info(NULL, 0); }
+  struct proc_info infos[MAX_THREADS];
+  size_t count = cell_proc_info(infos, max);
+  size_t copy = count < max ? count : max;
+  return user_writable(a0, copy * sizeof(infos[0])) && vmm_copy_to_user(active_as(), a0, infos, copy * sizeof(infos[0]))
+           ? (int64_t)count
+           : -(int64_t)EFAULT;
+}
+l_spore_fsinfo: {
+  struct vfs_fs_info raw;
+  if (!vfs_fs_info(&raw)) { return -(int64_t)EINVAL; }
+  struct fs_info64 info = {
+    .block_size = raw.block_size,
+    .block_count = raw.block_count,
+    .free_blocks = raw.free_blocks,
+    .inode_count = raw.inode_count,
+    .free_inodes = raw.free_inodes,
+  };
+  return user_writable(a0, sizeof(info)) && vmm_copy_to_user(active_as(), a0, &info, sizeof(info)) ? 0
+                                                                                                   : -(int64_t)EFAULT;
+}
+l_brk:
+  return sys_brk(a0);
+l_mmap:
+  return sys_mmap(a0, a1, a2, a3, a4, a5);
+l_munmap:
+  return sys_munmap(a0, a1);
+l_mprotect:
+  return sys_mprotect(a0, a1, a2);
+l_madvise:
+  return sys_madvise(a0, a1, a2);
+l_mremap:
+  return sys_mremap(a0, a1, a2, a3);
+l_socket:
+  return sys_socket(a0, a1, a2);
+l_bind:
+  return sys_bind(a0, a1, a2);
+l_connect:
+  return sys_connect(a0, a1, a2);
+l_sendto:
+  return sys_sendto(a0, a1, a2, a3, a4, a5);
+l_recvfrom:
+  return sys_recvfrom(f, a0, a1, a2, a3, a4, a5);
+l_getsockname:
+  return sys_getsockname(a0, a1, a2);
+l_openat:
+  return sys_openat(a0, a1, a2);
+l_close:
+  return cell_fd_close((int)a0);
+l_lseek:
+  return cell_fd_lseek((int)a0, (int64_t)a1, (int)a2);
+l_fstat:
+  return sys_fstat(a0, a1);
+l_newfstatat:
+  return sys_newfstatat(a0, a1, a2);
+l_getdents64:
+  return sys_getdents64(a0, a1, a2);
+l_readlinkat:
+  return -(int64_t)EINVAL;
+l_dup:
+  return cell_fd_dup((int)a0, 0);
+l_dup3:
+  return cell_fd_dup((int)a0, (int)a1);
+l_fcntl:
+  if (a1 == F_DUPFD) { return cell_fd_dup((int)a0, (int)a2); }
+  if (a1 == F_GETFL || a1 == F_SETFL) { return 0; }
+  return -(int64_t)EINVAL;
+l_getcwd:
+  return sys_getcwd(a0, a1);
+l_prlimit64:
+  return a3 == 0 ? 0 : zero_user(a3, 128);
+l_sysinfo:
+  return zero_user(a0 == 0 ? a2 : a0, 128);
+l_uname:
+  return sys_uname(a0);
+l_chroot:
+  return sys_chroot(a0);
+l_set_robust_list:
+  return cell_set_robust_list_current(a0);
+l_sched_getaffinity:
+  return sys_sched_getaffinity(a2, a1);
+l_set_tid_address:
+  return cell_set_tid_address_current(a0);
+l_ioctl:
+  return sys_ioctl(a0, a1, a2);
+l_mkdirat:
+  return sys_mkdirat(a0, a1);
+l_linkat:
+  return sys_linkat(a0, a1, a2, a3, a4);
+l_unlinkat:
+  return sys_unlinkat(a0, a1);
+l_renameat:
+  return sys_renameat(a0, a1, a2, a3);
+l_renameat2:
+  return a4 == 0 ? sys_renameat(a0, a1, a2, a3) : -(int64_t)EINVAL;
+l_fchmod:
+  return sys_fchmod(a0, a1);
+l_fchmodat:
+  return sys_fchmodat(a0, a1, a2, a3);
+l_ftruncate:
+  return sys_ftruncate(a0, a1);
+l_chdir:
+  return sys_chdir(a0);
+l_fchdir:
+  return cell_fd_is_dir((int)a0) ? 0 : -(int64_t)ENOTDIR;
+l_fsync:
+  return 0;
+l_getrandom:
+  return sys_getrandom(a0, a1);
+l_clock_gettime:
+  return sys_clock_gettime(a0, a1);
+l_enosys:
+  return -(int64_t)ENOSYS;
+l_unknown:
+  kprintf("[kernel] syscall %d ENOSYS\n", (int)nr);
+  return -(int64_t)ENOSYS;
+}
+#pragma clang diagnostic pop
 
 void handle_lower_sync(struct trap_frame *frame) {
   uint64_t ec = (frame->esr_el1 >> 26) & 0x3f;

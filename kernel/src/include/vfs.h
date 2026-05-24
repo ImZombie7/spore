@@ -11,6 +11,7 @@ enum vfs_backend {
   VFS_NONE,
   VFS_RAMFS,
   VFS_EXT2,
+  VFS_PROC,
 };
 
 struct vfs_node {
@@ -21,6 +22,9 @@ struct vfs_node {
   enum ramfs_device device;
   uint16_t mode;
   uint16_t links_count;
+  uint64_t dev_id;
+  uint64_t rdev;
+  int proc_pid;
   uint64_t size;
   struct ramfs_node ramfs;
   struct ext2_node ext2;

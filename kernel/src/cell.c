@@ -6,6 +6,7 @@
 #include "mm/pmm.h"
 #include "net.h"
 #include "pl011.h"
+#include "virtio_blk.h"
 
 static struct domain domains[MAX_DOMAINS];
 static struct thread threads[MAX_THREADS];
@@ -16,6 +17,9 @@ static int next_domain_id = 1;
 static int next_thread_id = 1;
 static int next_snapshot_id;
 static uint64_t device_rng_state = 0x9e3779b97f4a7c15ull;
+static uint64_t scheduler_ticks;
+
+static size_t domain_resident_pages(const struct domain *domain);
 
 enum {
   CELL_O_ACCMODE = 3,
@@ -32,6 +36,12 @@ enum {
   EFAULT = 14,
   EINVAL = 22,
   EIO = 5,
+  ECHILD = 10,
+  ESRCH = 3,
+  WNOHANG = 1,
+  SIGINT = 2,
+  SIGKILL = 9,
+  SIGTERM = 15,
   ROBUST_LIST_LIMIT = 16,
   FUTEX_OWNER_DIED = 0x40000000u,
 };
@@ -54,6 +64,47 @@ static bool starts_with(const char *s, const char *prefix) {
     if (*s++ != *prefix++) { return false; }
   }
   return true;
+}
+
+static void copy_cstr(char *dst, size_t cap, const char *src) {
+  if (cap == 0) { return; }
+  size_t i = 0;
+  if (src != NULL) {
+    for (; i + 1 < cap && src[i] != '\0'; ++i) {
+      dst[i] = src[i];
+    }
+  }
+  dst[i] = '\0';
+}
+
+static const char *base_name(const char *path) {
+  const char *base = path == NULL ? "" : path;
+  for (const char *p = base; *p != '\0'; ++p) {
+    if (*p == '/' && p[1] != '\0') { base = p + 1; }
+  }
+  return base;
+}
+
+static void set_domain_identity(struct domain *domain, const char *path, const char *const argv[], uint64_t argc) {
+  if (domain == NULL) { return; }
+  const char *argv0 = argc > 0 && argv != NULL && argv[0] != NULL && argv[0][0] != '\0' ? argv[0] : path;
+  copy_cstr(domain->exec_path, sizeof(domain->exec_path), path == NULL ? "" : path);
+  copy_cstr(domain->argv0, sizeof(domain->argv0), argv0 == NULL ? "" : argv0);
+  copy_cstr(domain->name, sizeof(domain->name), base_name(argv0 == NULL || argv0[0] == '\0' ? path : argv0));
+  domain->cmdline[0] = '\0';
+  size_t len = 0;
+  for (uint64_t i = 0; i < argc && argv != NULL && argv[i] != NULL; ++i) {
+    if (i != 0 && len + 1 < sizeof(domain->cmdline)) { domain->cmdline[len++] = ' '; }
+    const char *arg = argv[i];
+    while (*arg != '\0' && len + 1 < sizeof(domain->cmdline)) {
+      domain->cmdline[len++] = *arg++;
+    }
+  }
+  if (len == 0) {
+    copy_cstr(domain->cmdline, sizeof(domain->cmdline), domain->argv0);
+  } else {
+    domain->cmdline[len] = '\0';
+  }
 }
 
 static bool parse_dec(const char **cursor, uint32_t max, uint32_t *out) {
@@ -153,10 +204,17 @@ static struct domain *alloc_domain(void) {
       domains[i].used = true;
       domains[i].refcount = 0;
       domains[i].id = next_domain_id++;
+      domains[i].start_ticks = scheduler_ticks;
+      copy_cstr(domains[i].name, sizeof(domains[i].name), "?");
+      copy_cstr(domains[i].exec_path, sizeof(domains[i].exec_path), "");
+      copy_cstr(domains[i].argv0, sizeof(domains[i].argv0), "");
+      copy_cstr(domains[i].cmdline, sizeof(domains[i].cmdline), "");
       domains[i].cwd[0] = '/';
       domains[i].cwd[1] = '\0';
       domains[i].fs_root[0] = '/';
       domains[i].fs_root[1] = '\0';
+      domains[i].chroot[0] = '/';
+      domains[i].chroot[1] = '\0';
       return &domains[i];
     }
   }
@@ -236,8 +294,15 @@ static void copy_fd_table(struct domain *dst, const struct domain *src) {
 static void copy_domain_metadata(struct domain *dst, const struct domain *src) {
   kmemcpy(dst->cwd, src->cwd, sizeof(dst->cwd));
   kmemcpy(dst->fs_root, src->fs_root, sizeof(dst->fs_root));
+  kmemcpy(dst->chroot, src->chroot, sizeof(dst->chroot));
+  kmemcpy(dst->name, src->name, sizeof(dst->name));
+  kmemcpy(dst->exec_path, src->exec_path, sizeof(dst->exec_path));
+  kmemcpy(dst->argv0, src->argv0, sizeof(dst->argv0));
+  kmemcpy(dst->cmdline, src->cmdline, sizeof(dst->cmdline));
   dst->caps = src->caps;
   dst->budget = src->budget;
+  dst->start_ticks = scheduler_ticks;
+  dst->cpu_ticks = 0;
 }
 
 static struct snapshot *find_snapshot(int id) {
@@ -351,6 +416,7 @@ static void wake_parent_of(struct domain *child) {
   if (parent != NULL && parent->state == THREAD_BLOCKED && parent->wait_reason == WAIT_CHILD &&
       (parent->wait_target < 0 || parent->wait_target == child->id)) {
     int status = child->exit_status << 8;
+    if (child->term_signal != 0) { status = child->term_signal; }
     uint64_t status_addr = parent->tf.x[1];
     if (status_addr != 0) { (void)vmm_copy_to_user(&parent_domain->as, status_addr, &status, sizeof(status)); }
     parent->tf.x[0] = (uint64_t)child->id;
@@ -373,6 +439,7 @@ void cell_system_init(uint64_t hhdm_offset) {
   next_domain_id = 1;
   next_thread_id = 1;
   next_snapshot_id = 0;
+  scheduler_ticks = 0;
   // v2 Phase A object model: domains own isolation/policy state, threads own
   // EL0 execution state. The kernel remains run-to-completion on one core, so
   // these tables intentionally have no locks until a later SMP/preemptive goal.
@@ -387,6 +454,8 @@ bool cell_create_init(struct user_address_space *as, uint64_t entry, uint64_t sp
     return false;
   }
   domain->parent_id = 0;
+  static const char *init_argv[] = {"/init"};
+  set_domain_identity(domain, "/init", init_argv, 1);
   domain->as = *as;
   domain->as.asid = 0;
   vma_list_init(&domain->vmas);
@@ -446,6 +515,20 @@ bool cell_set_cwd(const char *path) {
 const char *cell_current_fs_root(void) {
   struct domain *domain = current_domain();
   return domain == NULL ? "/" : domain->fs_root;
+}
+
+const char *cell_current_chroot(void) {
+  struct domain *domain = current_domain();
+  return domain == NULL ? "/" : domain->chroot;
+}
+
+bool cell_set_chroot(const char *path) {
+  struct domain *domain = current_domain();
+  if (domain == NULL || path == NULL || path[0] != '/') { return false; }
+  size_t len = kstrlen(path);
+  if (len >= sizeof(domain->chroot)) { return false; }
+  kmemcpy(domain->chroot, path, len + 1);
+  return true;
 }
 
 static void cap_allow(struct capability_set *caps, uint64_t nr) {
@@ -614,6 +697,7 @@ void cell_exit_thread_current(int status, struct trap_frame *frame) {
   }
   if (runnable_or_blocked_threads_in_domain(domain) <= 1) {
     domain->exit_status = status;
+    domain->term_signal = 0;
     domain->zombie = true;
     current_thread->state = THREAD_ZOMBIE;
     wake_parent_of(domain);
@@ -629,6 +713,7 @@ void cell_exit_group_current(int status, struct trap_frame *frame) {
   if (current_thread == NULL) { return; }
   struct domain *domain = current_thread->domain;
   domain->exit_status = status;
+  domain->term_signal = 0;
   domain->zombie = true;
   for (size_t i = 0; i < MAX_THREADS; ++i) {
     if (&threads[i] != current_thread && threads[i].domain == domain) {
@@ -666,6 +751,7 @@ int cell_fork_current(struct trap_frame *frame) {
   child_thread->tf.x[0] = 0;
   child_thread->tpidr_el0 = current_thread->tpidr_el0;
   current_thread->tf.x[0] = (uint64_t)child_domain->id;
+  copy_cstr(child_domain->name, sizeof(child_domain->name), parent->name);
   return child_domain->id;
 }
 
@@ -745,11 +831,13 @@ static bool has_child(int parent_id, int pid) {
   return false;
 }
 
-int cell_wait4(int pid, uint64_t status_addr, struct trap_frame *frame) {
+int cell_wait4_options(int pid, uint64_t status_addr, int options, struct trap_frame *frame) {
   struct domain *domain = current_domain();
+  if (domain == NULL) { return -ECHILD; }
   struct domain *child = find_waitable_child(domain->id, pid);
   if (child == NULL) {
-    if (!has_child(domain->id, pid)) { return -10; }
+    if (!has_child(domain->id, pid)) { return -ECHILD; }
+    if ((options & WNOHANG) != 0) { return 0; }
     cell_save_current(frame);
     current_thread->state = THREAD_BLOCKED;
     current_thread->wait_reason = WAIT_CHILD;
@@ -759,6 +847,7 @@ int cell_wait4(int pid, uint64_t status_addr, struct trap_frame *frame) {
   }
 
   int status = child->exit_status << 8;
+  if (child->term_signal != 0) { status = child->term_signal; }
   if (status_addr != 0 && !vmm_copy_to_user(&domain->as, status_addr, &status, sizeof(status))) { return -14; }
   int child_id = child->id;
   struct thread *child_thread = thread_for_domain(child);
@@ -769,10 +858,17 @@ int cell_wait4(int pid, uint64_t status_addr, struct trap_frame *frame) {
   return child_id;
 }
 
+int cell_wait4(int pid, uint64_t status_addr, struct trap_frame *frame) {
+  return cell_wait4_options(pid, status_addr, 0, frame);
+}
+
 int cell_kill(int pid, int signal) {
   struct domain *domain = find_domain(pid);
-  if (domain == NULL || domain->zombie) { return -3; }
+  if (domain == NULL || domain->zombie) { return -ESRCH; }
+  if (signal == 0) { return 0; }
+  if (signal != SIGTERM && signal != SIGINT && signal != SIGKILL) { return 0; }
   domain->exit_status = 128 + signal;
+  domain->term_signal = signal;
   domain->zombie = true;
   for (size_t i = 0; i < MAX_THREADS; ++i) {
     if (threads[i].domain == domain) { threads[i].state = THREAD_ZOMBIE; }
@@ -782,7 +878,7 @@ int cell_kill(int pid, int signal) {
 }
 
 bool cell_exec_replace(struct user_address_space *as, struct vma_list *vmas, uint64_t entry, uint64_t sp,
-                       struct trap_frame *frame) {
+                       struct trap_frame *frame, const char *path, const char *const argv[], uint64_t argc) {
   struct domain *domain = current_domain();
   if (domain == NULL || current_thread == NULL) { return false; }
 
@@ -796,6 +892,7 @@ bool cell_exec_replace(struct user_address_space *as, struct vma_list *vmas, uin
   }
   domain->as = *as;
   domain->vmas = *vmas;
+  set_domain_identity(domain, path, argv, argc);
   vmm_install_user(&domain->as);
   vmm_destroy(&old_as);
 
@@ -819,9 +916,11 @@ int cell_set_budget(int domain_id, uint64_t ticks) {
 }
 
 void cell_timer_tick(struct trap_frame *frame, bool from_lower_el) {
+  ++scheduler_ticks;
   net_poll();
   struct domain *domain = current_domain();
   if (domain == NULL) { return; }
+  if (from_lower_el) { ++domain->cpu_ticks; }
   if (domain->budget.max_ticks != 0 && domain->budget.remaining_ticks != 0) {
     --domain->budget.remaining_ticks;
     if (domain->budget.remaining_ticks == 0) {
@@ -845,6 +944,341 @@ static uint8_t device_random_byte(void) {
 
 static int64_t read_stdin_to_user(struct domain *domain, uint64_t buf, uint64_t len);
 
+static const char *thread_state_text(enum thread_state state) {
+  switch (state) {
+  case THREAD_RUNNABLE:
+    return "running";
+  case THREAD_BLOCKED:
+    return "blocked";
+  case THREAD_ZOMBIE:
+    return "zombie";
+  case THREAD_UNUSED:
+    return "unused";
+  }
+  return "unknown";
+}
+
+static const char *wait_reason_text(enum wait_reason reason) {
+  switch (reason) {
+  case WAIT_NONE:
+    return "-";
+  case WAIT_CHILD:
+    return "child";
+  case WAIT_STDIN:
+    return "stdin";
+  case WAIT_SOCKET:
+    return "socket";
+  case WAIT_THREAD:
+    return "thread";
+  case WAIT_FUTEX:
+    return "futex";
+  }
+  return "?";
+}
+
+static const char *domain_state_text(const struct domain *domain) {
+  if (domain == NULL) { return "unknown"; }
+  if (domain->zombie) { return "zombie"; }
+  bool blocked = false;
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    if (threads[i].domain != domain || threads[i].state == THREAD_UNUSED) { continue; }
+    if (threads[i].state == THREAD_RUNNABLE) { return "running"; }
+    if (threads[i].state == THREAD_BLOCKED) { blocked = true; }
+  }
+  return blocked ? "blocked" : "unknown";
+}
+
+static const char *domain_wait_text(const struct domain *domain) {
+  if (domain == NULL || domain->zombie) { return "-"; }
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    if (threads[i].domain == domain && threads[i].state == THREAD_BLOCKED) {
+      return wait_reason_text(threads[i].wait_reason);
+    }
+  }
+  return "-";
+}
+
+static void proc_append_char(char *dst, size_t cap, size_t *len, char c) {
+  if (*len + 1 < cap) {
+    dst[*len] = c;
+    ++*len;
+    dst[*len] = '\0';
+  }
+}
+
+static void proc_append_str(char *dst, size_t cap, size_t *len, const char *s) {
+  while (*s != '\0') {
+    proc_append_char(dst, cap, len, *s++);
+  }
+}
+
+static void proc_append_u64(char *dst, size_t cap, size_t *len, uint64_t value) {
+  char tmp[32];
+  size_t n = 0;
+  if (value == 0) {
+    proc_append_char(dst, cap, len, '0');
+    return;
+  }
+  while (value != 0 && n < sizeof(tmp)) {
+    tmp[n++] = (char)('0' + (value % 10));
+    value /= 10;
+  }
+  while (n > 0) {
+    proc_append_char(dst, cap, len, tmp[--n]);
+  }
+}
+
+static size_t procinfo_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len,
+                  "pid ppid state wait rss_pages cpu_ticks age_ticks budget_remaining budget_max name exec_path cwd "
+                  "cmdline\n");
+  for (size_t i = 0; i < MAX_DOMAINS; ++i) {
+    const struct domain *domain = &domains[i];
+    if (!domain->used) { continue; }
+    proc_append_u64(dst, cap, &len, (uint32_t)domain->id);
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_u64(dst, cap, &len, (uint32_t)domain->parent_id);
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_str(dst, cap, &len, domain_state_text(domain));
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_str(dst, cap, &len, domain_wait_text(domain));
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_u64(dst, cap, &len, domain_resident_pages(domain));
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_u64(dst, cap, &len, domain->cpu_ticks);
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_u64(dst, cap, &len, scheduler_ticks - domain->start_ticks);
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_u64(dst, cap, &len, domain->budget.remaining_ticks);
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_u64(dst, cap, &len, domain->budget.max_ticks);
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_str(dst, cap, &len, domain->name);
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_str(dst, cap, &len, domain->exec_path[0] == '\0' ? "-" : domain->exec_path);
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_str(dst, cap, &len, domain->cwd);
+    proc_append_char(dst, cap, &len, ' ');
+    proc_append_str(dst, cap, &len, domain->cmdline[0] == '\0' ? domain->name : domain->cmdline);
+    proc_append_char(dst, cap, &len, '\n');
+  }
+  return len;
+}
+
+static size_t meminfo_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len, "MemTotalPages: ");
+  proc_append_u64(dst, cap, &len, pmm_total_pages());
+  proc_append_str(dst, cap, &len, "\nMemFreePages: ");
+  proc_append_u64(dst, cap, &len, pmm_free_pages());
+  proc_append_str(dst, cap, &len, "\nMemTotalKiB: ");
+  proc_append_u64(dst, cap, &len, pmm_total_pages() * 4);
+  proc_append_str(dst, cap, &len, "\nMemFreeKiB: ");
+  proc_append_u64(dst, cap, &len, pmm_free_pages() * 4);
+  proc_append_char(dst, cap, &len, '\n');
+  return len;
+}
+
+static size_t cpuinfo_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len,
+                  "processor\t: 0\n"
+                  "model name\t: Spore virtual CPU\n"
+                  "architecture\t: aarch64\n"
+                  "features\t: el0 el1 gicv3 virtio\n");
+  return len;
+}
+
+static size_t uptime_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_u64(dst, cap, &len, scheduler_ticks / 100);
+  proc_append_char(dst, cap, &len, '.');
+  proc_append_u64(dst, cap, &len, scheduler_ticks % 100);
+  proc_append_str(dst, cap, &len, " 0.00\n");
+  return len;
+}
+
+static size_t mounts_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len,
+                  "ext2-root / ext2 rw 0 0\n"
+                  "tmpfs /tmp tmpfs rw 0 0\n"
+                  "proc /proc proc ro 0 0\n"
+                  "dev /dev devfs rw 0 0\n");
+  return len;
+}
+
+static size_t filesystems_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len,
+                  "nodev\tproc\n"
+                  "nodev\tdevfs\n"
+                  "nodev\ttmpfs\n"
+                  "nodev\tramfs\n"
+                  "\text2\n");
+  return len;
+}
+
+static size_t partitions_text(char *dst, size_t cap) {
+  size_t len = 0;
+  struct vfs_fs_info info;
+  uint64_t root_blocks = 0;
+  if (vfs_fs_info(&info) && info.block_size != 0) { root_blocks = (info.block_count * info.block_size) / 1024; }
+  proc_append_str(dst, cap, &len,
+                  "major minor  #blocks  name\n"
+                  " 254     0   ");
+  proc_append_u64(dst, cap, &len, root_blocks);
+  proc_append_str(dst, cap, &len,
+                  "  vda\n"
+                  " 254     1    16384  vdb\n");
+  return len;
+}
+
+static size_t devices_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len,
+                  "Character devices:\n"
+                  "  1 mem\n"
+                  "  5 tty\n"
+                  " 10 misc\n"
+                  "\nBlock devices:\n"
+                  "254 virtblk\n");
+  return len;
+}
+
+static size_t fs_root_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len, "ext2 root filesystem mounted at /\n");
+  return len;
+}
+
+static size_t fs_boot_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len, "ESP boot filesystem image used by UEFI\n");
+  return len;
+}
+
+static size_t fs_ram0_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len, "synthetic boot ramfs for devfs/procfs and fallback modules\n");
+  return len;
+}
+
+static size_t fs_tmp_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len, "tmpfs mounted at /tmp\n");
+  return len;
+}
+
+static size_t stat_text(char *dst, size_t cap) {
+  size_t len = 0;
+  proc_append_str(dst, cap, &len, "cpu  ");
+  proc_append_u64(dst, cap, &len, scheduler_ticks);
+  proc_append_str(dst, cap, &len, " 0 0 0\nprocesses ");
+  proc_append_u64(dst, cap, &len, (uint32_t)(next_domain_id - 1));
+  proc_append_str(dst, cap, &len, "\nthreads ");
+  proc_append_u64(dst, cap, &len, (uint32_t)(next_thread_id - 1));
+  proc_append_char(dst, cap, &len, '\n');
+  return len;
+}
+
+static const struct domain *domain_for_pid(int pid) {
+  return find_domain(pid);
+}
+
+static size_t proc_pid_status_text(char *dst, size_t cap, int pid) {
+  size_t len = 0;
+  const struct domain *domain = domain_for_pid(pid);
+  if (domain == NULL) { return 0; }
+  proc_append_str(dst, cap, &len, "Name:\t");
+  proc_append_str(dst, cap, &len, domain->name);
+  proc_append_str(dst, cap, &len, "\nState:\t");
+  proc_append_str(dst, cap, &len, domain_state_text(domain));
+  proc_append_str(dst, cap, &len, "\nPid:\t");
+  proc_append_u64(dst, cap, &len, (uint32_t)domain->id);
+  proc_append_str(dst, cap, &len, "\nPPid:\t");
+  proc_append_u64(dst, cap, &len, (uint32_t)domain->parent_id);
+  proc_append_str(dst, cap, &len, "\nVmRSSPages:\t");
+  proc_append_u64(dst, cap, &len, domain_resident_pages(domain));
+  proc_append_str(dst, cap, &len, "\nCpuTicks:\t");
+  proc_append_u64(dst, cap, &len, domain->cpu_ticks);
+  proc_append_str(dst, cap, &len, "\nCwd:\t");
+  proc_append_str(dst, cap, &len, domain->cwd);
+  proc_append_char(dst, cap, &len, '\n');
+  return len;
+}
+
+static size_t proc_pid_stat_text(char *dst, size_t cap, int pid) {
+  size_t len = 0;
+  const struct domain *domain = domain_for_pid(pid);
+  if (domain == NULL) { return 0; }
+  proc_append_u64(dst, cap, &len, (uint32_t)domain->id);
+  proc_append_str(dst, cap, &len, " (");
+  proc_append_str(dst, cap, &len, domain->name);
+  proc_append_str(dst, cap, &len, ") ");
+  proc_append_char(dst, cap, &len, domain_state_text(domain)[0]);
+  proc_append_char(dst, cap, &len, ' ');
+  proc_append_u64(dst, cap, &len, (uint32_t)domain->parent_id);
+  proc_append_char(dst, cap, &len, ' ');
+  proc_append_u64(dst, cap, &len, domain->cpu_ticks);
+  proc_append_char(dst, cap, &len, ' ');
+  proc_append_u64(dst, cap, &len, domain_resident_pages(domain));
+  proc_append_char(dst, cap, &len, '\n');
+  return len;
+}
+
+static size_t proc_pid_cmdline_text(char *dst, size_t cap, int pid) {
+  size_t len = 0;
+  const struct domain *domain = domain_for_pid(pid);
+  if (domain == NULL) { return 0; }
+  proc_append_str(dst, cap, &len, domain->cmdline[0] == '\0' ? domain->name : domain->cmdline);
+  proc_append_char(dst, cap, &len, '\n');
+  return len;
+}
+
+static size_t proc_pid_cwd_text(char *dst, size_t cap, int pid) {
+  size_t len = 0;
+  const struct domain *domain = domain_for_pid(pid);
+  if (domain == NULL) { return 0; }
+  proc_append_str(dst, cap, &len, domain->cwd);
+  proc_append_char(dst, cap, &len, '\n');
+  return len;
+}
+
+static size_t proc_pid_exe_text(char *dst, size_t cap, int pid) {
+  size_t len = 0;
+  const struct domain *domain = domain_for_pid(pid);
+  if (domain == NULL) { return 0; }
+  proc_append_str(dst, cap, &len, domain->exec_path[0] == '\0' ? "-" : domain->exec_path);
+  proc_append_char(dst, cap, &len, '\n');
+  return len;
+}
+
+static int64_t read_generated_device(struct open_file *file, struct domain *domain, uint64_t buf, uint64_t len,
+                                     size_t (*fill)(char *, size_t)) {
+  char text[2048] = {0};
+  size_t text_len = fill(text, sizeof(text));
+  if (file->offset >= text_len) { return 0; }
+  size_t chunk = text_len - (size_t)file->offset;
+  if (chunk > len) { chunk = (size_t)len; }
+  if (!vmm_copy_to_user(&domain->as, buf, text + file->offset, chunk)) { return -14; }
+  file->offset += chunk;
+  return (int64_t)chunk;
+}
+
+static int64_t read_generated_pid_device(struct open_file *file, struct domain *domain, uint64_t buf, uint64_t len,
+                                         size_t (*fill)(char *, size_t, int)) {
+  char text[2048] = {0};
+  size_t text_len = fill(text, sizeof(text), file->node.proc_pid);
+  if (file->offset >= text_len) { return 0; }
+  size_t chunk = text_len - (size_t)file->offset;
+  if (chunk > len) { chunk = (size_t)len; }
+  if (!vmm_copy_to_user(&domain->as, buf, text + file->offset, chunk)) { return -14; }
+  file->offset += chunk;
+  return (int64_t)chunk;
+}
+
 static int64_t write_console_from_user(struct domain *domain, uint64_t buf, uint64_t len) {
   for (uint64_t i = 0; i < len; ++i) {
     char c;
@@ -866,6 +1300,39 @@ static int64_t write_device(struct open_file *file, struct domain *domain, uint6
   case RAMFS_DEV_CONSOLE:
   case RAMFS_DEV_TTY:
     return write_console_from_user(domain, buf, len);
+  case RAMFS_DEV_PROCINFO:
+  case RAMFS_DEV_MEMINFO:
+  case RAMFS_DEV_CPUINFO:
+  case RAMFS_DEV_UPTIME:
+  case RAMFS_DEV_MOUNTS:
+  case RAMFS_DEV_STAT:
+  case RAMFS_DEV_FILESYSTEMS:
+  case RAMFS_DEV_PARTITIONS:
+  case RAMFS_DEV_DEVICES:
+  case RAMFS_DEV_PROC_PID_STAT:
+  case RAMFS_DEV_PROC_PID_STATUS:
+  case RAMFS_DEV_PROC_PID_CMDLINE:
+  case RAMFS_DEV_PROC_PID_CWD:
+  case RAMFS_DEV_PROC_PID_EXE:
+  case RAMFS_DEV_FS_ROOT:
+  case RAMFS_DEV_FS_BOOT:
+  case RAMFS_DEV_FS_RAM0:
+  case RAMFS_DEV_FS_TMP:
+  case RAMFS_DEV_BLK_BOOT:
+    return -22;
+  case RAMFS_DEV_BLK_ROOT: {
+    uint8_t tmp[128];
+    uint64_t done = 0;
+    while (done < len) {
+      uint64_t chunk = len - done;
+      if (chunk > sizeof(tmp)) { chunk = sizeof(tmp); }
+      if (!vmm_copy_from_user(&domain->as, tmp, buf + done, (size_t)chunk)) { return -14; }
+      if (!virtio_blk_write(file->offset, tmp, (uint32_t)chunk)) { return -5; }
+      file->offset += chunk;
+      done += chunk;
+    }
+    return (int64_t)done;
+  }
   case RAMFS_DEV_NONE:
     break;
   }
@@ -900,6 +1367,68 @@ static int64_t read_device(struct open_file *file, struct domain *domain, uint64
     current_thread->stdin_len = len;
     cell_schedule(frame);
     return CELL_SWITCHED;
+  }
+  case RAMFS_DEV_PROCINFO:
+    return read_generated_device(file, domain, buf, len, procinfo_text);
+  case RAMFS_DEV_MEMINFO:
+    return read_generated_device(file, domain, buf, len, meminfo_text);
+  case RAMFS_DEV_CPUINFO:
+    return read_generated_device(file, domain, buf, len, cpuinfo_text);
+  case RAMFS_DEV_UPTIME:
+    return read_generated_device(file, domain, buf, len, uptime_text);
+  case RAMFS_DEV_MOUNTS:
+    return read_generated_device(file, domain, buf, len, mounts_text);
+  case RAMFS_DEV_STAT:
+    return read_generated_device(file, domain, buf, len, stat_text);
+  case RAMFS_DEV_FILESYSTEMS:
+    return read_generated_device(file, domain, buf, len, filesystems_text);
+  case RAMFS_DEV_PARTITIONS:
+    return read_generated_device(file, domain, buf, len, partitions_text);
+  case RAMFS_DEV_DEVICES:
+    return read_generated_device(file, domain, buf, len, devices_text);
+  case RAMFS_DEV_PROC_PID_STAT:
+    return read_generated_pid_device(file, domain, buf, len, proc_pid_stat_text);
+  case RAMFS_DEV_PROC_PID_STATUS:
+    return read_generated_pid_device(file, domain, buf, len, proc_pid_status_text);
+  case RAMFS_DEV_PROC_PID_CMDLINE:
+    return read_generated_pid_device(file, domain, buf, len, proc_pid_cmdline_text);
+  case RAMFS_DEV_PROC_PID_CWD:
+    return read_generated_pid_device(file, domain, buf, len, proc_pid_cwd_text);
+  case RAMFS_DEV_PROC_PID_EXE:
+    return read_generated_pid_device(file, domain, buf, len, proc_pid_exe_text);
+  case RAMFS_DEV_FS_ROOT:
+    return read_generated_device(file, domain, buf, len, fs_root_text);
+  case RAMFS_DEV_FS_BOOT:
+    return read_generated_device(file, domain, buf, len, fs_boot_text);
+  case RAMFS_DEV_FS_RAM0:
+    return read_generated_device(file, domain, buf, len, fs_ram0_text);
+  case RAMFS_DEV_FS_TMP:
+    return read_generated_device(file, domain, buf, len, fs_tmp_text);
+  case RAMFS_DEV_BLK_ROOT: {
+    uint8_t tmp[128];
+    uint64_t done = 0;
+    while (done < len) {
+      uint64_t chunk = len - done;
+      if (chunk > sizeof(tmp)) { chunk = sizeof(tmp); }
+      if (!virtio_blk_read(file->offset, tmp, (uint32_t)chunk)) { return done == 0 ? -5 : (int64_t)done; }
+      if (!vmm_copy_to_user(&domain->as, buf + done, tmp, (size_t)chunk)) { return -14; }
+      file->offset += chunk;
+      done += chunk;
+    }
+    return (int64_t)done;
+  }
+  case RAMFS_DEV_BLK_BOOT: {
+    uint8_t tmp[128];
+    uint64_t done = 0;
+    while (done < len) {
+      uint64_t chunk = len - done;
+      if (chunk > sizeof(tmp)) { chunk = sizeof(tmp); }
+      if (!virtio_blk_read_boot(file->offset, tmp, (uint32_t)chunk)) { return done == 0 ? -5 : (int64_t)done; }
+      if (!vmm_copy_to_user(&domain->as, buf + done, tmp, (size_t)chunk)) { return -14; }
+      file->offset += chunk;
+      done += chunk;
+    }
+    return (int64_t)done;
   }
   case RAMFS_DEV_NONE:
     break;
@@ -1229,7 +1758,16 @@ bool cell_fd_stat(int fd, struct vfs_node *out) {
   if (domain == NULL || fd < 0 || fd >= MAX_FDS || domain->fds[fd] == NULL) { return false; }
   struct open_file *file = domain->fds[fd];
   if (file->type == OPEN_STDOUT || file->type == OPEN_STDIN) {
-    *out = (struct vfs_node){.backend = VFS_RAMFS, .ino = 10, .is_dir = false, .device = RAMFS_DEV_TTY};
+    *out = (struct vfs_node){
+      .backend = VFS_RAMFS,
+      .ino = 10,
+      .is_dir = false,
+      .device = RAMFS_DEV_TTY,
+      .mode = 0020666u,
+      .links_count = 1,
+      .dev_id = 0x0005,
+      .rdev = (5u << 8),
+    };
     return true;
   }
   return vfs_refresh(&file->node, out);
@@ -1339,31 +1877,50 @@ static size_t domain_resident_pages(const struct domain *domain) {
 
 size_t cell_proc_info(struct proc_info *out, size_t max) {
   size_t count = 0;
-  for (size_t i = 0; i < MAX_THREADS; ++i) {
-    const struct thread *thread = &threads[i];
-    if (thread->state == THREAD_UNUSED || thread->domain == NULL) { continue; }
+  for (size_t i = 0; i < MAX_DOMAINS; ++i) {
+    const struct domain *domain = &domains[i];
+    if (!domain->used) { continue; }
     if (count < max && out != NULL) {
-      const struct domain *domain = thread->domain;
       struct proc_info info = {
         .pid = (uint32_t)domain->id,
-        .tid = (uint32_t)thread->tid,
+        .tid = (uint32_t)(thread_for_domain((struct domain *)domain) == NULL
+                            ? 0
+                            : thread_for_domain((struct domain *)domain)->tid),
         .ppid = (uint32_t)domain->parent_id,
-        .state = (uint32_t)thread->state,
-        .wait_reason = (uint32_t)thread->wait_reason,
+        .state = (uint32_t)(domain->zombie
+                              ? THREAD_ZOMBIE
+                              : (str_eq(domain_state_text(domain), "blocked") ? THREAD_BLOCKED : THREAD_RUNNABLE)),
+        .wait_reason = 0,
         .resident_pages = domain_resident_pages(domain),
+        .cpu_ticks = domain->cpu_ticks,
+        .start_ticks = domain->start_ticks,
         .remaining_ticks = domain->budget.remaining_ticks,
         .max_ticks = domain->budget.max_ticks,
       };
-      size_t j = 0;
-      for (; j + 1 < sizeof(info.cwd) && domain->cwd[j] != '\0'; ++j) {
-        info.cwd[j] = domain->cwd[j];
-      }
-      info.cwd[j] = '\0';
+      copy_cstr(info.name, sizeof(info.name), domain->name);
+      copy_cstr(info.exec_path, sizeof(info.exec_path), domain->exec_path);
+      copy_cstr(info.argv0, sizeof(info.argv0), domain->argv0);
+      copy_cstr(info.cmdline, sizeof(info.cmdline), domain->cmdline);
+      copy_cstr(info.cwd, sizeof(info.cwd), domain->cwd);
       out[count] = info;
     }
     ++count;
   }
   return count;
+}
+
+bool cell_proc_exists(int pid) {
+  return find_domain(pid) != NULL;
+}
+
+int cell_proc_pid_at(size_t index) {
+  size_t seen = 0;
+  for (size_t i = 0; i < MAX_DOMAINS; ++i) {
+    if (!domains[i].used) { continue; }
+    if (seen == index) { return domains[i].id; }
+    ++seen;
+  }
+  return 0;
 }
 
 int snapshot_create_current(void) {

@@ -9,6 +9,7 @@ int main(void) {
   char line[LINE_CAP];
   int last = 0;
   for (;;) {
+    sh_reap_jobs(true);
     if (sh_read_line(line, sizeof(line)) < 0) { return last; }
     last = sh_execute_line(line, last);
   }

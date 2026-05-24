@@ -7,6 +7,7 @@ static const char *type_name(mode_t mode) {
   if (S_ISREG(mode)) { return "regular file"; }
   if (S_ISDIR(mode)) { return "directory"; }
   if (S_ISCHR(mode)) { return "character special file"; }
+  if (S_ISBLK(mode)) { return "block special file"; }
   return "special file";
 }
 
@@ -25,6 +26,7 @@ int main(int argc, char **argv) {
            (long)st.st_blksize, type_name(st.st_mode));
     printf("Device: %llu\tInode: %llu\tLinks: %lu\n", (unsigned long long)st.st_dev, (unsigned long long)st.st_ino,
            (unsigned long)st.st_nlink);
+    if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) { printf("Device type: %llu\n", (unsigned long long)st.st_rdev); }
     printf("Access: (%04o)\tUid: (%u)\tGid: (%u)\n", (unsigned)(st.st_mode & 07777), (unsigned)st.st_uid,
            (unsigned)st.st_gid);
   }
