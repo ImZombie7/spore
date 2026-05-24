@@ -36,6 +36,7 @@ static const char *shell_commands[] = {
   "dirname /tmp/coreutils\n",
   "basename /tmp/coreutils\n",
   "date\n",
+  "uptime\n",
   "whoami\n",
   "hostname\n",
   "cp /tmp/coreutils /tmp/coreutils.copy\n",

@@ -18,6 +18,7 @@ userland/bin/dirname /bin/dirname
 userland/bin/basename /bin/basename
 userland/bin/sleep /bin/sleep
 userland/bin/date /bin/date
+userland/bin/uptime /bin/uptime
 userland/bin/whoami /bin/whoami
 userland/bin/hostname /bin/hostname
 userland/bin/tee /bin/tee

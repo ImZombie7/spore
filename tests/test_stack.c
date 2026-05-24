@@ -29,6 +29,12 @@ bool vmm_alloc_page(struct user_address_space *as, uint64_t va, uint32_t flags) 
   return true;
 }
 
+bool vmm_is_mapped(const struct user_address_space *as, uint64_t va) {
+  (void)as;
+  assert((va % PAGE_SIZE) == 0);
+  return mapped[stack_offset(va) / PAGE_SIZE];
+}
+
 bool vmm_copy_to_user(const struct user_address_space *as, uint64_t dst, const void *src, size_t len) {
   (void)as;
   uint64_t off = stack_offset(dst);
@@ -55,9 +61,12 @@ int main(void) {
 
   assert(build_initial_stack(&as, &elf, &sp));
   assert((sp % 16) == 0);
+  size_t mapped_count = 0;
   for (size_t i = 0; i < sizeof(mapped) / sizeof(mapped[0]); ++i) {
-    assert(mapped[i]);
+    if (mapped[i]) { ++mapped_count; }
   }
+  assert(mapped_count < sizeof(mapped) / sizeof(mapped[0]));
+  assert(mapped[(USER_STACK_SIZE / PAGE_SIZE) - 1]);
 
   assert(read_u64(sp) == 1);
   uint64_t argv0 = read_u64(sp + 8);

@@ -55,6 +55,26 @@ typedef struct EFI_SYSTEM_TABLE EFI_SYSTEM_TABLE;
 typedef struct EFI_RUNTIME_SERVICES EFI_RUNTIME_SERVICES;
 
 typedef struct {
+  UINT16 year;
+  UINT8 month;
+  UINT8 day;
+  UINT8 hour;
+  UINT8 minute;
+  UINT8 second;
+  UINT8 pad1;
+  UINT32 nanosecond;
+  int16_t timezone;
+  UINT8 daylight;
+  UINT8 pad2;
+} EFI_TIME;
+
+typedef struct {
+  UINT32 resolution;
+  UINT32 accuracy;
+  uint8_t sets_to_zero;
+} EFI_TIME_CAPABILITIES;
+
+typedef struct {
   uint32_t type;
   EFI_PHYSICAL_ADDRESS physical_start;
   EFI_VIRTUAL_ADDRESS virtual_start;
@@ -96,7 +116,7 @@ struct EFI_BOOT_SERVICES {
 
 struct EFI_RUNTIME_SERVICES {
   EFI_TABLE_HEADER hdr;
-  void *get_time;
+  EFI_STATUS (*get_time)(EFI_TIME *time, EFI_TIME_CAPABILITIES *capabilities);
   void *set_time;
   void *get_wakeup_time;
   void *set_wakeup_time;

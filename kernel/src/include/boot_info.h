@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 #define SPORE_BOOT_MAGIC 0x53504f5245424f4full
-#define SPORE_BOOT_VERSION 1u
+#define SPORE_BOOT_VERSION 2u
 #define SPORE_BOOT_MODULE_PATH_MAX 96u
 
 enum spore_memmap_type {
@@ -40,4 +40,5 @@ struct spore_boot_info {
   uint64_t kernel_phys_base;
   uint64_t kernel_virt_base;
   uint64_t uart_phys;
+  uint64_t realtime_epoch_sec;
 };

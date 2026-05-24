@@ -92,6 +92,42 @@ static void set_boot_timeout_zero(void) {
                                            sizeof(timeout), &timeout);
 }
 
+static int is_leap_year(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+static uint64_t unix_days_before_year(int year) {
+  uint64_t days = 0;
+  for (int y = 1970; y < year; ++y) {
+    days += is_leap_year(y) ? 366u : 365u;
+  }
+  return days;
+}
+
+static uint64_t unix_epoch_from_efi_time(const EFI_TIME *time) {
+  static const uint8_t month_days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (time == NULL || time->year < 1970 || time->month < 1 || time->month > 12 || time->day < 1 || time->day > 31) {
+    return 0;
+  }
+  uint64_t days = unix_days_before_year(time->year);
+  for (uint8_t m = 1; m < time->month; ++m) {
+    days += month_days[m - 1];
+    if (m == 2 && is_leap_year(time->year)) { ++days; }
+  }
+  days += time->day - 1;
+  int64_t seconds = (int64_t)(days * 86400ull + (uint64_t)time->hour * 3600ull + (uint64_t)time->minute * 60ull +
+                              (uint64_t)time->second);
+  if (time->timezone >= -1440 && time->timezone <= 1440) { seconds -= (int64_t)time->timezone * 60; }
+  return seconds > 0 ? (uint64_t)seconds : 0;
+}
+
+static uint64_t read_realtime_epoch(void) {
+  if (st->runtime_services == NULL || st->runtime_services->get_time == NULL) { return 0; }
+  EFI_TIME time;
+  if (EFI_ERROR(st->runtime_services->get_time(&time, NULL))) { return 0; }
+  return unix_epoch_from_efi_time(&time);
+}
+
 static void uart_putc(char c) {
   volatile uint32_t *uart = (volatile uint32_t *)(uintptr_t)PL011_PHYS;
   volatile uint32_t *fr = (volatile uint32_t *)(uintptr_t)(PL011_PHYS + 0x18);
@@ -542,6 +578,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *system_table) {
   boot->kernel_phys_base = kernel_phys_base;
   boot->kernel_virt_base = kernel_virt_base;
   boot->uart_phys = PL011_PHYS;
+  boot->realtime_epoch_sec = read_realtime_epoch();
 
   status = final_memory_map(memmap, &boot->memmap_count, efi_map, 16 * PAGE_SIZE, image);
   if (EFI_ERROR(status)) { return status; }

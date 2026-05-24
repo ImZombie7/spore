@@ -1,5 +1,6 @@
 #include "cell.h"
 
+#include "exec/stack.h"
 #include "kprintf.h"
 #include "mem.h"
 #include "mm/pmm.h"
@@ -389,6 +390,12 @@ bool cell_create_init(struct user_address_space *as, uint64_t entry, uint64_t sp
   domain->as = *as;
   domain->as.asid = 0;
   vma_list_init(&domain->vmas);
+  if (!vma_insert(&domain->vmas, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP, VMM_USER_READ | VMM_USER_WRITE, 0,
+                  VMA_ANON)) {
+    thread->state = THREAD_UNUSED;
+    domain->used = false;
+    return false;
+  }
   if (!init_stdio(domain)) {
     thread->state = THREAD_UNUSED;
     domain->used = false;

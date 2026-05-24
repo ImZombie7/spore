@@ -218,6 +218,9 @@ static struct user_address_space *current_as;
 static struct ramfs *sys_ramfs;
 static uint64_t rng_state = 0x73706f72652d7630ull;
 static bool path_policy_denied;
+static uint64_t realtime_base_sec;
+static uint64_t realtime_base_cnt;
+static uint64_t realtime_freq;
 
 static uint64_t align_down(uint64_t value, uint64_t align) {
   return value & ~(align - 1);
@@ -245,6 +248,12 @@ void syscall_set_address_space(struct user_address_space *as) {
 
 void syscall_set_ramfs(struct ramfs *fs) {
   sys_ramfs = fs;
+}
+
+void syscall_set_boot_time(uint64_t epoch_sec) {
+  realtime_base_sec = epoch_sec;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(realtime_base_cnt));
+  __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(realtime_freq));
 }
 
 static struct user_address_space *active_as(void) {
@@ -534,14 +543,26 @@ static int64_t sys_getrandom(uint64_t buf, uint64_t len) {
 }
 
 static int64_t sys_clock_gettime(uint64_t clk_id, uint64_t tp) {
-  (void)clk_id;
+  enum {
+    CLOCK_REALTIME = 0,
+    CLOCK_MONOTONIC = 1,
+  };
   uint64_t cnt;
   uint64_t freq;
   __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cnt));
   __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+  uint64_t elapsed_cnt = cnt;
+  uint64_t base_sec = 0;
+  if (clk_id == CLOCK_REALTIME) {
+    base_sec = realtime_base_sec;
+    if (cnt >= realtime_base_cnt) { elapsed_cnt = cnt - realtime_base_cnt; }
+    if (realtime_freq != 0) { freq = realtime_freq; }
+  } else if (clk_id != CLOCK_MONOTONIC) {
+    return -(int64_t)EINVAL;
+  }
   struct timespec64 ts = {
-    .tv_sec = (int64_t)(cnt / freq),
-    .tv_nsec = (int64_t)(((cnt % freq) * 1000000000ull) / freq),
+    .tv_sec = (int64_t)(base_sec + elapsed_cnt / freq),
+    .tv_nsec = (int64_t)(((elapsed_cnt % freq) * 1000000000ull) / freq),
   };
   return user_writable(tp, sizeof(ts)) && vmm_copy_to_user(active_as(), tp, &ts, sizeof(ts)) ? 0 : -(int64_t)EFAULT;
 }
@@ -657,6 +678,11 @@ static int64_t sys_execve(struct trap_frame *frame, uint64_t path_addr, uint64_t
     elf.at_base = interp.load_base;
   }
   if (!build_initial_stack_args(&new_as, &elf, argv, argc, envp, envc, &user_sp)) {
+    vmm_destroy(&new_as);
+    return -(int64_t)EINVAL;
+  }
+  if (!vma_insert(&new_vmas, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_TOP, VMM_USER_READ | VMM_USER_WRITE, 0,
+                  VMA_ANON)) {
     vmm_destroy(&new_as);
     return -(int64_t)EINVAL;
   }
