@@ -134,25 +134,7 @@ test_qemu_args = qemu_base_args + [
 ]
 
 run_target('run',
-  command: [
-    files('../tools/run_qemu.py'),
-  ] + qemu_args,
-  depends: image)
-
-run_target('run-raw',
   command: qemu_args,
-  depends: image)
-
-run_target('run-stdin',
-  command: [
-    files('../tools/run_qemu_input.py'),
-  ] + qemu_args,
-  depends: image)
-
-run_target('run-shell',
-  command: [
-    files('../tools/run_qemu_shell.py'),
-  ] + qemu_args,
   depends: image)
 
 run_target('run-tests',
@@ -160,19 +142,3 @@ run_target('run-tests',
     files('../tools/run_qemu.py'),
   ] + test_qemu_args,
   depends: test_image)
-
-run_target('run-tcg',
-  command: [
-    files('../tools/run_qemu.py'),
-    'qemu-system-aarch64',
-    '-M', 'virt,gic-version=3',
-    '-accel', 'tcg',
-    '-cpu', 'max',
-    '-m', '512M',
-    '-boot', 'order=d,menu=off,strict=on',
-    '-drive', 'if=pflash,format=raw,readonly=on,file=' + qemu_code,
-    '-cdrom', image_iso,
-    '-serial', 'stdio',
-    '-display', 'none',
-  ],
-  depends: image)

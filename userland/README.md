@@ -22,9 +22,12 @@ each tool independently confineable by the policy layer.
 5. Run:
 
 ```sh
-meson compile -C build
-meson compile -C build run-shell
+make build
+make run
 ```
+
+Use `make test` for host tests and `make run-tests` for the scripted regression
+image.
 
 Commands should return `0` on success, `1` for ordinary runtime failure, and
 `2` for usage errors. Keep diagnostics on stderr unless the command's normal
@@ -43,5 +46,5 @@ Interactive boot stays lean. The old boot-time gauntlet lives in
 `userland/tests/integration` and runs through:
 
 ```sh
-meson compile -C build run-tests
+make run-tests
 ```
