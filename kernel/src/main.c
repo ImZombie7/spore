@@ -1,6 +1,7 @@
 #include "kprintf.h"
 #include "arch/aarch64/exceptions.h"
 #include "arch/aarch64/timer.h"
+#include "boot_info.h"
 #include "cell.h"
 #include "elf/loader.h"
 #include "exec/stack.h"
@@ -10,51 +11,12 @@
 #include "pl011.h"
 #include "ramfs.h"
 
-#include <limine.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-__attribute__((used, section(".limine_requests_start")))
-static volatile uint64_t limine_requests_start_marker[4] = LIMINE_REQUESTS_START_MARKER;
-
-__attribute__((used, section(".limine_requests")))
-static volatile uint64_t limine_base_revision[3] = LIMINE_BASE_REVISION(6);
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_hhdm_request hhdm_request = {
-    .id = LIMINE_HHDM_REQUEST_ID,
-    .revision = 0,
-};
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_executable_address_request executable_address_request = {
-    .id = LIMINE_EXECUTABLE_ADDRESS_REQUEST_ID,
-    .revision = 0,
-};
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_memmap_request memmap_request = {
-    .id = LIMINE_MEMMAP_REQUEST_ID,
-    .revision = 0,
-};
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_module_request module_request = {
-    .id = LIMINE_MODULE_REQUEST_ID,
-    .revision = 0,
-};
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_stack_size_request stack_size_request = {
-    .id = LIMINE_STACK_SIZE_REQUEST_ID,
-    .revision = 0,
-    .stack_size = 64 * 1024,
-};
-
-__attribute__((used, section(".limine_requests_end")))
-static volatile uint64_t limine_requests_end_marker[2] = LIMINE_REQUESTS_END_MARKER;
+static const struct spore_boot_info *boot;
 
 void kputc(char c) {
     pl011_putc(c);
@@ -161,13 +123,11 @@ static uint8_t kernel_stack[64 * 1024] __attribute__((aligned(16)));
 static struct ramfs boot_ramfs;
 
 static uint64_t kernel_virt_to_phys(uintptr_t va) {
-    const struct limine_executable_address_response *executable =
-        executable_address_request.response;
-    return (uint64_t)va - executable->virtual_base + executable->physical_base;
+    return (uint64_t)va - boot->kernel_virt_base + boot->kernel_phys_base;
 }
 
 static uint64_t *phys_to_hhdm(uint64_t pa) {
-    return (uint64_t *)(uintptr_t)(hhdm_request.response->offset + pa);
+    return (uint64_t *)(uintptr_t)(boot->hhdm_offset + pa);
 }
 
 static uint64_t pt_entry_address(uint64_t entry) {
@@ -193,8 +153,26 @@ static uint64_t *alloc_early_l3(void) {
     return table;
 }
 
+static void split_l2_block(uint64_t *l2, size_t index) {
+    uint64_t entry = l2[index];
+    if ((entry & 0x3ull) != 0x1ull) {
+        return;
+    }
+    uint64_t *table = alloc_early_l3();
+    if (table == NULL) {
+        return;
+    }
+    uint64_t base = entry & 0x0000ffffffe00000ull;
+    uint64_t attrs = entry & ~0x0000ffffffe00000ull;
+    attrs &= ~0x3ull;
+    for (size_t i = 0; i < PT_ENTRIES; ++i) {
+        table[i] = (base + i * EARLY_PAGE_SIZE) | attrs | 0x3ull;
+    }
+    l2[index] = table_descriptor(table);
+}
+
 static void map_device_page(uint64_t pa) {
-    const uint64_t va = hhdm_request.response->offset + pa;
+    const uint64_t va = boot->hhdm_offset + pa;
     uint64_t ttbr1;
     __asm__ volatile("mrs %0, ttbr1_el1" : "=r"(ttbr1));
 
@@ -221,6 +199,7 @@ static void map_device_page(uint64_t pa) {
         }
         l2[l2i] = table_descriptor(table);
     }
+    split_l2_block(l2, l2i);
     uint64_t *l3 = phys_to_hhdm(pt_entry_address(l2[l2i]));
 
     const uint64_t attr_index_device = 2ull << 2;
@@ -283,27 +262,33 @@ void finish_enter_el0(struct user_address_space *as, uint64_t entry, uint64_t us
     enter_el0(entry, user_sp);
 }
 
-void kernel_main(void) {
-    if (hhdm_request.response == NULL || executable_address_request.response == NULL ||
-        memmap_request.response == NULL ||
-        !LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) {
+void kernel_main(const struct spore_boot_info *boot_info) {
+    if (boot_info == NULL || boot_info->magic != SPORE_BOOT_MAGIC ||
+        boot_info->version != SPORE_BOOT_VERSION || boot_info->hhdm_offset == 0 ||
+        boot_info->memmap_phys == 0 || boot_info->modules_phys == 0) {
         for (;;) {
             __asm__ volatile("wfe");
         }
     }
+    boot = boot_info;
 
     map_device_pages();
-    pl011_init(hhdm_request.response->offset);
+    pl011_init(boot->hhdm_offset);
 
     kprintf("[kernel] booted at EL%u\n", (unsigned)current_el());
 
-    pmm_init(hhdm_request.response->offset, memmap_request.response);
+    const struct spore_memmap_entry *memmap =
+        (const struct spore_memmap_entry *)(uintptr_t)(boot->hhdm_offset + boot->memmap_phys);
+    const struct spore_boot_module *modules =
+        (const struct spore_boot_module *)(uintptr_t)(boot->hhdm_offset + boot->modules_phys);
+
+    pmm_init(boot->hhdm_offset, memmap, boot->memmap_count);
     exceptions_init();
-    timer_init(hhdm_request.response->offset);
-    cell_system_init(hhdm_request.response->offset);
+    timer_init(boot->hhdm_offset);
+    cell_system_init(boot->hhdm_offset);
 
     struct ramfs_file init;
-    ramfs_init(&boot_ramfs, module_request.response);
+    ramfs_init(&boot_ramfs, modules, boot->module_count, boot->hhdm_offset);
     syscall_set_ramfs(&boot_ramfs);
     if (!ramfs_lookup(&boot_ramfs, "/init", &init)) {
         kprintf("[kernel] missing /init\n");
@@ -316,7 +301,7 @@ void kernel_main(void) {
     struct user_address_space as;
     struct loaded_elf elf;
     uint64_t user_sp;
-    if (!vmm_user_init(&as, hhdm_request.response->offset) ||
+    if (!vmm_user_init(&as, boot->hhdm_offset) ||
         !elf_load_static_aarch64(&as, init.data, init.size, &elf) ||
         !build_initial_stack(&as, &elf, &user_sp)) {
         kprintf("[kernel] failed to prepare /init\n");

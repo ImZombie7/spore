@@ -49,7 +49,9 @@ static bool is_free(uint64_t page) {
     return (bitmap[page / BITS_PER_WORD] & (1ull << (page % BITS_PER_WORD))) == 0;
 }
 
-void pmm_init(uint64_t hhdm_offset, const struct limine_memmap_response *memmap) {
+void pmm_init(uint64_t hhdm_offset,
+              const struct spore_memmap_entry *memmap,
+              uint32_t memmap_count) {
     hhdm_base = (uint64_t *)(uintptr_t)hhdm_offset;
     for (size_t i = 0; i < PMM_BITMAP_WORDS; ++i) {
         bitmap[i] = UINT64_MAX;
@@ -60,9 +62,9 @@ void pmm_init(uint64_t hhdm_offset, const struct limine_memmap_response *memmap)
     total_page_count = PMM_MAX_PAGES;
     free_page_count = 0;
 
-    for (uint64_t i = 0; i < memmap->entry_count; ++i) {
-        const struct limine_memmap_entry *entry = memmap->entries[i];
-        if (entry->type != LIMINE_MEMMAP_USABLE) {
+    for (uint32_t i = 0; i < memmap_count; ++i) {
+        const struct spore_memmap_entry *entry = &memmap[i];
+        if (entry->type != SPORE_MEMMAP_USABLE) {
             continue;
         }
 

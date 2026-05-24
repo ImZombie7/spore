@@ -4,19 +4,13 @@
 #include <stdint.h>
 
 int main(void) {
-    struct limine_memmap_entry usable = {
+    struct spore_memmap_entry memmap[] = {{
         .base = 0x100000,
         .length = 16 * PAGE_SIZE,
-        .type = LIMINE_MEMMAP_USABLE,
-    };
-    struct limine_memmap_entry *entries[] = {&usable};
-    struct limine_memmap_response memmap = {
-        .revision = 0,
-        .entry_count = 1,
-        .entries = entries,
-    };
+        .type = SPORE_MEMMAP_USABLE,
+    }};
 
-    pmm_init(0, &memmap);
+    pmm_init(0, memmap, 1);
     assert(pmm_free_pages() == 16);
 
     uint64_t first = pmm_alloc_page();

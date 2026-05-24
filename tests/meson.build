@@ -1,6 +1,5 @@
 test_include = [
   include_directories('../kernel/src/include'),
-  include_directories('../third_party/limine-protocol/include'),
 ]
 
 test_pmm = executable('test_pmm',

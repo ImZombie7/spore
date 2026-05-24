@@ -148,16 +148,11 @@ static bool add_ro_file(struct ramfs *fs, const char *path, const void *data, ui
     return true;
 }
 
-static bool path_matches(const struct limine_file *file, const char *path) {
-    if (file->string != NULL && streq(file->string, path)) {
-        return true;
-    }
-    return false;
-}
-
-void ramfs_init(struct ramfs *fs, const struct limine_module_response *modules) {
+void ramfs_init(struct ramfs *fs,
+                const struct spore_boot_module *modules,
+                uint32_t module_count,
+                uint64_t hhdm_offset) {
     kmemset(fs, 0, sizeof(*fs));
-    fs->modules = modules;
     fs->next_ino = 1;
 
     int root = alloc_node(fs);
@@ -166,6 +161,7 @@ void ramfs_init(struct ramfs *fs, const struct limine_module_response *modules) 
     copy_name(fs->nodes[root].name, "");
 
     (void)add_node(fs, root, "bin", true, true);
+    (void)add_node(fs, root, "demos", true, true);
     (void)add_node(fs, root, "etc", true, true);
     (void)add_node(fs, root, "tmp", true, true);
     (void)add_ro_file(fs, "/etc/motd", motd, sizeof(motd) - 1);
@@ -173,28 +169,16 @@ void ramfs_init(struct ramfs *fs, const struct limine_module_response *modules) 
     if (modules == NULL) {
         return;
     }
-    for (uint64_t i = 0; i < modules->module_count; ++i) {
-        const struct limine_file *file = modules->modules[i];
-        const char *path = file->string != NULL ? file->string : NULL;
+    for (uint32_t i = 0; i < module_count; ++i) {
+        const struct spore_boot_module *file = &modules[i];
+        const char *path = file->path;
         if (path != NULL && path[0] == '/') {
-            (void)add_ro_file(fs, path, file->address, file->size);
+            (void)add_ro_file(fs, path, (const void *)(uintptr_t)(hhdm_offset + file->phys_addr), file->size);
         }
     }
 }
 
 bool ramfs_lookup(const struct ramfs *fs, const char *path, struct ramfs_file *out) {
-    if (fs->modules != NULL) {
-        for (uint64_t i = 0; i < fs->modules->module_count; ++i) {
-            const struct limine_file *file = fs->modules->modules[i];
-            if (!path_matches(file, path)) {
-                continue;
-            }
-            out->path = file->string != NULL ? file->string : file->path;
-            out->data = file->address;
-            out->size = file->size;
-            return true;
-        }
-    }
     int index = lookup_index(fs, path);
     if (index < 0 || fs->nodes[index].is_dir) {
         return false;
@@ -251,9 +235,10 @@ bool ramfs_dirent(const struct ramfs *fs, int dir_index, size_t index, struct ra
 bool ramfs_root_dirent(size_t index, struct ramfs_dirent *out) {
     static const struct ramfs_dirent entries[] = {
         {.name = "bin", .ino = 2, .is_dir = true},
-        {.name = "etc", .ino = 3, .is_dir = true},
-        {.name = "tmp", .ino = 4, .is_dir = true},
-        {.name = "init", .ino = 6, .is_dir = false},
+        {.name = "demos", .ino = 3, .is_dir = true},
+        {.name = "etc", .ino = 4, .is_dir = true},
+        {.name = "tmp", .ino = 5, .is_dir = true},
+        {.name = "init", .ino = 7, .is_dir = false},
     };
     if (index >= sizeof(entries) / sizeof(entries[0])) {
         return false;

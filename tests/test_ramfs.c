@@ -6,27 +6,19 @@
 
 int main(void) {
     const char init_data[] = "init";
-    struct limine_file init = {
-        .address = (void *)init_data,
-        .size = sizeof(init_data),
-        .path = "boot():/boot/init",
-        .string = "/init",
-    };
-    struct limine_file other = {
-        .address = (void *)"x",
+    struct spore_boot_module modules[] = {{
+        .phys_addr = (uint64_t)(uintptr_t)"x",
         .size = 1,
-        .path = "boot():/boot/other",
-        .string = "/other",
-    };
-    struct limine_file *files[] = {&other, &init};
-    struct limine_module_response modules = {
-        .module_count = 2,
-        .modules = files,
-    };
+        .path = "/other",
+    }, {
+        .phys_addr = (uint64_t)(uintptr_t)init_data,
+        .size = sizeof(init_data),
+        .path = "/init",
+    }};
 
     struct ramfs fs;
     struct ramfs_file file;
-    ramfs_init(&fs, &modules);
+    ramfs_init(&fs, modules, 2, 0);
 
     assert(ramfs_lookup(&fs, "/init", &file));
     assert(file.data == init_data);
@@ -48,10 +40,12 @@ int main(void) {
     assert(ramfs_root_dirent(0, &ent));
     assert(strcmp(ent.name, "bin") == 0 && ent.is_dir);
     assert(ramfs_root_dirent(1, &ent));
-    assert(strcmp(ent.name, "etc") == 0 && ent.is_dir);
+    assert(strcmp(ent.name, "demos") == 0 && ent.is_dir);
     assert(ramfs_root_dirent(2, &ent));
-    assert(strcmp(ent.name, "tmp") == 0 && ent.is_dir);
+    assert(strcmp(ent.name, "etc") == 0 && ent.is_dir);
     assert(ramfs_root_dirent(3, &ent));
+    assert(strcmp(ent.name, "tmp") == 0 && ent.is_dir);
+    assert(ramfs_root_dirent(4, &ent));
     assert(strcmp(ent.name, "init") == 0 && !ent.is_dir);
 
     assert(ramfs_mkdir(&fs, "/tmp/d"));

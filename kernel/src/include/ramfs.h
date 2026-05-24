@@ -1,6 +1,6 @@
 #pragma once
 
-#include <limine.h>
+#include "boot_info.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -24,7 +24,6 @@ struct ramfs_mem_node {
 };
 
 struct ramfs {
-    const struct limine_module_response *modules;
     struct ramfs_mem_node nodes[RAMFS_MAX_NODES];
     uint64_t next_ino;
 };
@@ -51,7 +50,10 @@ struct ramfs_dirent {
     bool is_dir;
 };
 
-void ramfs_init(struct ramfs *fs, const struct limine_module_response *modules);
+void ramfs_init(struct ramfs *fs,
+                const struct spore_boot_module *modules,
+                uint32_t module_count,
+                uint64_t hhdm_offset);
 bool ramfs_lookup(const struct ramfs *fs, const char *path, struct ramfs_file *out);
 bool ramfs_lookup_node(const struct ramfs *fs, const char *path, struct ramfs_node *out);
 bool ramfs_root_dirent(size_t index, struct ramfs_dirent *out);

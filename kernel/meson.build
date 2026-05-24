@@ -38,30 +38,43 @@ kernel_elf = executable('kernel.elf',
   kernel_sources,
   include_directories: [
     include_directories('src/include'),
-    include_directories('../third_party/limine-protocol/include'),
   ],
   c_args: kernel_c_args,
   link_depends: files('linker.ld'),
   install: false)
 
-limine_dir = meson.project_source_root() / 'third_party' / 'limine'
 iso_root = meson.current_build_dir() / 'iso_root'
 image_iso = meson.project_build_root() / 'image.iso'
 test_iso_root = meson.current_build_dir() / 'test_iso_root'
 test_image_iso = meson.project_build_root() / 'test_image.iso'
 
-make_limine = custom_target('limine-host-tool',
-  output: 'limine-built.stamp',
-  command: ['sh', '-c', 'make -C "$1" && touch "$2"', 'sh', limine_dir, '@OUTPUT@'],
+boot_efi = custom_target('BOOTAA64.EFI',
+  input: files('../bootloader/main.c'),
+  output: 'BOOTAA64.EFI',
+  command: [
+    'clang',
+    '--target=aarch64-unknown-windows',
+    '-ffreestanding',
+    '-fshort-wchar',
+    '-fno-stack-protector',
+    '-fno-builtin',
+    '-nostdlib',
+    '-Wno-builtin-requires-header',
+    '-fuse-ld=lld-link',
+    '-Wl,/subsystem:efi_application',
+    '-Wl,/entry:efi_main',
+    '@INPUT@',
+    '-o',
+    '@OUTPUT@',
+  ],
   build_by_default: true)
 
 image = custom_target('image.iso',
   input: [
     kernel_elf,
-    files('boot/limine.conf.in'),
     files('../userland/image.manifest'),
     files('../tools/build_image.py'),
-    make_limine,
+    boot_efi,
   ],
   output: 'image.iso',
   command: [
@@ -69,8 +82,7 @@ image = custom_target('image.iso',
     meson.project_source_root(),
     iso_root,
     kernel_elf,
-    files('boot/limine.conf.in'),
-    limine_dir,
+    boot_efi,
     image_iso,
     '@OUTPUT@',
   ],
@@ -80,10 +92,9 @@ image = custom_target('image.iso',
 test_image = custom_target('test_image.iso',
   input: [
     kernel_elf,
-    files('boot/limine.conf.in'),
     files('../userland/tests/integration/image.manifest'),
     files('../tools/build_image.py'),
-    make_limine,
+    boot_efi,
   ],
   output: 'test_image.iso',
   command: [
@@ -91,8 +102,7 @@ test_image = custom_target('test_image.iso',
     meson.project_source_root(),
     test_iso_root,
     kernel_elf,
-    files('boot/limine.conf.in'),
-    limine_dir,
+    boot_efi,
     test_image_iso,
     '@OUTPUT@',
     files('../userland/tests/integration/image.manifest'),

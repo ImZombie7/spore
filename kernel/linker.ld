@@ -23,13 +23,6 @@ SECTIONS
     *(.rodata .rodata.*)
   } :rodata
 
-  .limine_requests : ALIGN(8)
-  {
-    KEEP(*(.limine_requests_start))
-    KEEP(*(.limine_requests))
-    KEEP(*(.limine_requests_end))
-  } :rodata
-
   .data : ALIGN(0x1000)
   {
     *(.data .data.*)
@@ -43,4 +36,3 @@ SECTIONS
     __bss_end = .;
   } :data
 }
-
