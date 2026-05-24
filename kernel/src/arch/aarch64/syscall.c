@@ -24,8 +24,11 @@ enum {
   SYS_FCNTL = 25,
   SYS_IOCTL = 29,
   SYS_MKDIRAT = 34,
+  SYS_LINKAT = 37,
   SYS_UNLINKAT = 35,
   SYS_RENAMEAT = 38,
+  SYS_FCHMOD = 52,
+  SYS_FCHMODAT = 53,
   SYS_FTRUNCATE = 46,
   SYS_CHDIR = 49,
   SYS_FCHDIR = 50,
@@ -681,14 +684,8 @@ static int64_t sys_openat(uint64_t dirfd, uint64_t path_addr, uint64_t flags) {
 static void fill_stat(struct stat64_aarch64 *st, const struct vfs_node *node) {
   kmemset(st, 0, sizeof(*st));
   st->st_ino = node->ino;
-  uint32_t type = 0100000u;
-  if (node->is_dir) {
-    type = 0040000u;
-  } else if (node->device != RAMFS_DEV_NONE) {
-    type = 0020000u;
-  }
-  st->st_mode = type | 0666u;
-  st->st_nlink = 1;
+  st->st_mode = node->mode;
+  st->st_nlink = node->links_count == 0 ? 1 : node->links_count;
   st->st_size = (int64_t)node->size;
   st->st_blksize = PAGE_SIZE;
   st->st_blocks = (int64_t)((node->size + 511) / 512);
@@ -795,6 +792,33 @@ static int64_t sys_renameat(uint64_t old_dirfd, uint64_t old_path_addr, uint64_t
     return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
   }
   return vfs_rename(old_path, new_path) ? 0 : -(int64_t)ENOENT;
+}
+
+static int64_t sys_linkat(uint64_t old_dirfd, uint64_t old_path_addr, uint64_t new_dirfd, uint64_t new_path_addr,
+                          uint64_t flags) {
+  if ((int64_t)old_dirfd != AT_FDCWD || (int64_t)new_dirfd != AT_FDCWD || flags != 0) { return -(int64_t)EINVAL; }
+  char old_path[128];
+  char new_path[128];
+  if (!copy_resolved_path(old_path_addr, old_path, sizeof(old_path)) ||
+      !copy_resolved_path(new_path_addr, new_path, sizeof(new_path))) {
+    return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
+  }
+  return vfs_link(old_path, new_path) ? 0 : -(int64_t)ENOENT;
+}
+
+static int64_t sys_fchmodat(uint64_t dirfd, uint64_t path_addr, uint64_t mode, uint64_t flags) {
+  if ((int64_t)dirfd != AT_FDCWD || (flags & ~0x100ull) != 0) { return -(int64_t)EINVAL; }
+  char path[128];
+  if (!copy_resolved_path(path_addr, path, sizeof(path))) {
+    return path_policy_denied ? -(int64_t)EPERM : -(int64_t)EFAULT;
+  }
+  return vfs_chmod(path, (uint32_t)mode) ? 0 : -(int64_t)ENOENT;
+}
+
+static int64_t sys_fchmod(uint64_t fd, uint64_t mode) {
+  struct vfs_node node;
+  if (!cell_fd_stat((int)fd, &node)) { return -(int64_t)EBADF; }
+  return vfs_chmod_node(&node, (uint32_t)mode) ? 0 : -(int64_t)EINVAL;
 }
 
 static int64_t sys_ftruncate(uint64_t fd, uint64_t size) {
@@ -1051,12 +1075,18 @@ static int64_t dispatch(struct trap_frame *f) {
     return 0;
   case SYS_MKDIRAT:
     return sys_mkdirat(a0, a1);
+  case SYS_LINKAT:
+    return sys_linkat(a0, a1, a2, a3, a4);
   case SYS_UNLINKAT:
     return sys_unlinkat(a0, a1);
   case SYS_RENAMEAT:
     return sys_renameat(a0, a1, a2, a3);
   case SYS_RENAMEAT2:
     return a4 == 0 ? sys_renameat(a0, a1, a2, a3) : -(int64_t)EINVAL;
+  case SYS_FCHMOD:
+    return sys_fchmod(a0, a1);
+  case SYS_FCHMODAT:
+    return sys_fchmodat(a0, a1, a2, a3);
   case SYS_FTRUNCATE:
     return sys_ftruncate(a0, a1);
   case SYS_CHDIR:

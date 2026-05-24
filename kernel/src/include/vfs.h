@@ -19,6 +19,8 @@ struct vfs_node {
   bool is_dir;
   bool writable;
   enum ramfs_device device;
+  uint16_t mode;
+  uint16_t links_count;
   uint64_t size;
   struct ramfs_node ramfs;
   struct ext2_node ext2;
@@ -37,6 +39,9 @@ bool vfs_lookup_exec(const char *path, const void **data, uint64_t *size);
 bool vfs_mkdir(const char *path);
 bool vfs_create(const char *path, struct vfs_node *out);
 bool vfs_truncate(const struct vfs_node *node, uint64_t size);
+bool vfs_link(const char *old_path, const char *new_path);
+bool vfs_chmod(const char *path, uint32_t mode);
+bool vfs_chmod_node(const struct vfs_node *node, uint32_t mode);
 bool vfs_unlink(const char *path);
 bool vfs_rename(const char *old_path, const char *new_path);
 uint64_t vfs_read(const struct vfs_node *node, uint64_t off, void *dst, uint64_t len);

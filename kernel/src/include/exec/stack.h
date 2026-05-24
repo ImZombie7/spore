@@ -5,6 +5,11 @@
 
 #include <stdint.h>
 
+enum {
+  USER_STACK_TOP = 0x0000fffffff00000ull,
+  USER_STACK_SIZE = 4 * 1024 * 1024,
+};
+
 bool build_initial_stack(struct user_address_space *as, const struct loaded_elf *elf, uint64_t *stack_pointer);
 bool build_initial_stack_args(struct user_address_space *as, const struct loaded_elf *elf, const char *const argv[],
                               uint64_t argc, const char *const envp[], uint64_t envc, uint64_t *stack_pointer);

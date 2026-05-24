@@ -216,6 +216,7 @@ static bool read_inode(struct ext2_fs *fs, uint32_t ino, struct ext2_node *out) 
   if (!read_bytes(fs, off, &inode, sizeof(inode))) { return false; }
   out->ino = ino;
   out->mode = inode.mode;
+  out->links_count = inode.links_count;
   out->size = inode.size;
   for (size_t i = 0; i < 15; ++i) {
     out->blocks[i] = inode.block[i];
@@ -239,7 +240,7 @@ static bool write_inode(struct ext2_fs *fs, const struct ext2_node *node) {
   if (!read_bytes(fs, off, &inode, sizeof(inode))) { return false; }
   inode.mode = node->mode;
   inode.size = node->size;
-  inode.links_count = ext2_is_dir(node) ? 2 : 1;
+  inode.links_count = node->links_count;
   inode.sectors_count = ((node->size + 511) / 512);
   for (size_t i = 0; i < 15; ++i) {
     inode.block[i] = node->blocks[i];
@@ -690,7 +691,11 @@ bool ext2_create(struct ext2_fs *fs, const char *path, bool dir, struct ext2_nod
   }
   uint32_t ino = 0;
   if (!alloc_inode(fs, &ino)) { return false; }
-  struct ext2_node node = {.ino = ino, .mode = (uint16_t)(dir ? (EXT2_S_IFDIR | 0755) : (EXT2_S_IFREG | 0755))};
+  struct ext2_node node = {
+    .ino = ino,
+    .mode = (uint16_t)(dir ? (EXT2_S_IFDIR | 0755) : (EXT2_S_IFREG | 0755)),
+    .links_count = (uint16_t)(dir ? 2 : 1),
+  };
   if (dir) {
     uint32_t block = 0;
     uint8_t buf[4096];
@@ -710,6 +715,39 @@ bool ext2_create(struct ext2_fs *fs, const char *path, bool dir, struct ext2_nod
   return true;
 }
 
+bool ext2_link(struct ext2_fs *fs, const char *old_path, const char *new_path) {
+  char new_parent_path[256];
+  char new_name[EXT2_NAME_MAX + 1];
+  if (!split_parent_path(new_path, new_parent_path, sizeof(new_parent_path), new_name, sizeof(new_name))) {
+    return false;
+  }
+  struct ext2_node node;
+  struct ext2_node parent;
+  struct ext2_node existing;
+  if (!ext2_lookup(fs, old_path, &node) || ext2_is_dir(&node) || !ext2_lookup(fs, new_parent_path, &parent) ||
+      !ext2_is_dir(&parent) || lookup_child(fs, &parent, new_name, kstrlen(new_name), &existing)) {
+    return false;
+  }
+  if (node.links_count == UINT16_MAX ||
+      !add_dirent(fs, &parent, new_name, node.ino, ext2_is_dir(&node) ? EXT2_FT_DIR : EXT2_FT_REG_FILE)) {
+    return false;
+  }
+  ++node.links_count;
+  return write_inode(fs, &node);
+}
+
+bool ext2_chmod_node(struct ext2_fs *fs, const struct ext2_node *node, uint32_t mode) {
+  if (node == NULL) { return false; }
+  struct ext2_node copy = *node;
+  copy.mode = (uint16_t)((copy.mode & 0170000u) | (mode & 07777u));
+  return write_inode(fs, &copy);
+}
+
+bool ext2_chmod(struct ext2_fs *fs, const char *path, uint32_t mode) {
+  struct ext2_node node;
+  return ext2_lookup(fs, path, &node) && ext2_chmod_node(fs, &node, mode);
+}
+
 bool ext2_unlink(struct ext2_fs *fs, const char *path) {
   char parent_path[256];
   char name[EXT2_NAME_MAX + 1];
@@ -726,6 +764,10 @@ bool ext2_unlink(struct ext2_fs *fs, const char *path) {
     }
   }
   if (!remove_dirent(fs, &parent, name, NULL)) { return false; }
+  if (node.links_count > 1) {
+    --node.links_count;
+    return write_inode(fs, &node);
+  }
   (void)ext2_truncate(fs, &node, 0);
   (void)free_inode(fs, node.ino);
   return true;

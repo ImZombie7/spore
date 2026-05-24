@@ -28,6 +28,7 @@ struct ext2_fs {
 struct ext2_node {
   uint32_t ino;
   uint16_t mode;
+  uint16_t links_count;
   uint32_t size;
   uint32_t blocks[15];
 };
@@ -47,6 +48,9 @@ bool ext2_read_file(struct ext2_fs *fs, const struct ext2_node *node, uint64_t o
 int64_t ext2_write_file(struct ext2_fs *fs, struct ext2_node *node, uint64_t off, const void *src, uint64_t len);
 bool ext2_truncate(struct ext2_fs *fs, struct ext2_node *node, uint64_t size);
 bool ext2_create(struct ext2_fs *fs, const char *path, bool dir, struct ext2_node *out);
+bool ext2_link(struct ext2_fs *fs, const char *old_path, const char *new_path);
+bool ext2_chmod(struct ext2_fs *fs, const char *path, uint32_t mode);
+bool ext2_chmod_node(struct ext2_fs *fs, const struct ext2_node *node, uint32_t mode);
 bool ext2_unlink(struct ext2_fs *fs, const char *path);
 bool ext2_rename(struct ext2_fs *fs, const char *old_path, const char *new_path);
 bool ext2_dirent(struct ext2_fs *fs, const struct ext2_node *dir, size_t index, struct ext2_dirent *out);

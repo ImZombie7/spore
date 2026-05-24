@@ -34,12 +34,16 @@ static bool starts_with(const char *s, const char *prefix) {
 }
 
 static void from_ramfs(const struct ramfs_node *node, struct vfs_node *out) {
+  uint16_t mode = node->is_dir ? 0040777u : 0100666u;
+  if (node->device != RAMFS_DEV_NONE) { mode = 0020666u; }
   *out = (struct vfs_node){
     .backend = VFS_RAMFS,
     .ino = node->ino,
     .is_dir = node->is_dir,
     .writable = true,
     .device = node->device,
+    .mode = mode,
+    .links_count = 1,
     .size = node->size,
     .ramfs = *node,
   };
@@ -52,6 +56,8 @@ static void from_ext2(const struct ext2_node *node, struct vfs_node *out) {
     .is_dir = ext2_is_dir(node),
     .writable = false,
     .device = RAMFS_DEV_NONE,
+    .mode = node->mode,
+    .links_count = node->links_count,
     .size = node->size,
     .ext2 = *node,
   };
@@ -213,6 +219,25 @@ bool vfs_unlink(const char *path) {
     return ok;
   }
   return root_ramfs != NULL && ramfs_unlink(root_ramfs, path);
+}
+
+bool vfs_link(const char *old_path, const char *new_path) {
+  if (root_ext2 != NULL && !starts_with(old_path, "/dev") && !starts_with(new_path, "/dev")) {
+    bool ok = ext2_link(root_ext2, old_path, new_path);
+    if (ok) { invalidate_exec_cache(); }
+    return ok;
+  }
+  return false;
+}
+
+bool vfs_chmod(const char *path, uint32_t mode) {
+  if (root_ext2 != NULL && !starts_with(path, "/dev")) { return ext2_chmod(root_ext2, path, mode); }
+  return root_ramfs != NULL && starts_with(path, "/dev");
+}
+
+bool vfs_chmod_node(const struct vfs_node *node, uint32_t mode) {
+  if (node->backend == VFS_EXT2) { return ext2_chmod_node(root_ext2, &node->ext2, mode); }
+  return node->backend == VFS_RAMFS;
 }
 
 bool vfs_rename(const char *old_path, const char *new_path) {

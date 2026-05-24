@@ -20,9 +20,6 @@ enum {
   AT_RANDOM = 25,
 };
 
-#define STACK_TOP 0x0000fffffff00000ull
-#define STACK_SIZE (8 * PAGE_SIZE)
-
 static uint64_t align_down(uint64_t value, uint64_t align) {
   return value & ~(align - 1);
 }
@@ -38,11 +35,11 @@ bool build_initial_stack(struct user_address_space *as, const struct loaded_elf 
 
 bool build_initial_stack_args(struct user_address_space *as, const struct loaded_elf *elf, const char *const argv[],
                               uint64_t argc, const char *const envp[], uint64_t envc, uint64_t *stack_pointer) {
-  for (uint64_t va = STACK_TOP - STACK_SIZE; va < STACK_TOP; va += PAGE_SIZE) {
+  for (uint64_t va = USER_STACK_TOP - USER_STACK_SIZE; va < USER_STACK_TOP; va += PAGE_SIZE) {
     if (!vmm_alloc_page(as, va, VMM_USER_READ | VMM_USER_WRITE)) { return false; }
   }
 
-  uint64_t cursor = STACK_TOP;
+  uint64_t cursor = USER_STACK_TOP;
   uint64_t argv_va[16];
   uint64_t envp_va[16];
 
