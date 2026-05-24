@@ -6,6 +6,9 @@ userland/bin/ls /bin/ls
 userland/bin/cat /bin/cat
 userland/bin/echo /bin/echo
 userland/bin/clear /bin/clear
+userland/bin/file /bin/file
+userland/bin/stat /bin/stat
+userland/bin/uname /bin/uname
 userland/bin/edit /bin/edit
 userland/bin/mkdir /bin/mkdir
 userland/bin/rm /bin/rm

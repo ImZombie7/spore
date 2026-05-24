@@ -26,6 +26,7 @@ static const char *shell_commands[] = {
   "echo console-ok > /dev/console\n",
   "echo full > /dev/full\n",
   "cat /etc/motd\n",
+  "uname -a\n",
   "edit /etc/motd\nd 1\na\nhello from ext2\n.\nw\nq\n",
   "cat /etc/motd\n",
   "echo hi > /tmp/f\n",

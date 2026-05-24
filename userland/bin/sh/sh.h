@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "util.h"
+#include "spore.h"
 
 extern char **environ;
 

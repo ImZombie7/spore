@@ -1,5 +1,13 @@
 userland_musl_cc = find_program('aarch64-unknown-linux-musl-gcc')
 userland_include_arg = '-I' + meson.current_source_dir() / 'lib/spore'
+userland_generated_include_arg = '-I' + meson.current_build_dir()
+
+spore_version_conf = configuration_data()
+spore_version_conf.set_quoted('SPORE_ROOT_TAG', spore_root_tag)
+configure_file(
+  output: 'spore_version.h',
+  configuration: spore_version_conf)
+
 userland_cc = [
   userland_musl_cc,
   '-std=c23',
@@ -8,6 +16,7 @@ userland_cc = [
   '-Wl,-dynamic-linker,/lib/ld-musl-aarch64.so.1',
   '-Wl,-rpath,/lib',
   userland_include_arg,
+  userland_generated_include_arg,
 ]
 userland_static_cc = [
   userland_musl_cc,
@@ -16,6 +25,7 @@ userland_static_cc = [
   '-D_GNU_SOURCE',
   '-s',
   userland_include_arg,
+  userland_generated_include_arg,
 ]
 userland_image_targets = []
 userland_test_targets = []
@@ -29,6 +39,9 @@ subdir('bin/ls')
 subdir('bin/cat')
 subdir('bin/echo')
 subdir('bin/clear')
+subdir('bin/file')
+subdir('bin/stat')
+subdir('bin/uname')
 subdir('bin/edit')
 subdir('bin/mkdir')
 subdir('bin/rm')

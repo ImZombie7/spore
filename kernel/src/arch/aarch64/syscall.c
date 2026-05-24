@@ -9,6 +9,7 @@
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "ramfs.h"
+#include "spore_version.h"
 #include "vfs.h"
 
 #include <stdbool.h>
@@ -163,6 +164,15 @@ struct iovec64 {
 struct timespec64 {
   int64_t tv_sec;
   int64_t tv_nsec;
+};
+
+struct utsname64 {
+  char sysname[65];
+  char nodename[65];
+  char release[65];
+  char version[65];
+  char machine[65];
+  char domainname[65];
 };
 
 struct stat64_aarch64 {
@@ -531,6 +541,27 @@ static int64_t sys_clock_gettime(uint64_t clk_id, uint64_t tp) {
     .tv_nsec = (int64_t)(((cnt % freq) * 1000000000ull) / freq),
   };
   return user_writable(tp, sizeof(ts)) && vmm_copy_to_user(active_as(), tp, &ts, sizeof(ts)) ? 0 : -(int64_t)EFAULT;
+}
+
+static void uts_copy(char dst[65], const char *src) {
+  size_t i = 0;
+  while (i < 64 && src[i] != '\0') {
+    dst[i] = src[i];
+    ++i;
+  }
+  dst[i] = '\0';
+}
+
+static int64_t sys_uname(uint64_t buf) {
+  struct utsname64 u;
+  kmemset(&u, 0, sizeof(u));
+  uts_copy(u.sysname, SPORE_UTS_SYSNAME);
+  uts_copy(u.nodename, SPORE_UTS_NODENAME);
+  uts_copy(u.release, SPORE_UTS_RELEASE);
+  uts_copy(u.version, SPORE_UTS_VERSION);
+  uts_copy(u.machine, SPORE_UTS_MACHINE);
+  uts_copy(u.domainname, SPORE_UTS_DOMAINNAME);
+  return user_writable(buf, sizeof(u)) && vmm_copy_to_user(active_as(), buf, &u, sizeof(u)) ? 0 : -(int64_t)EFAULT;
 }
 
 static int64_t sys_clone(struct trap_frame *f, uint64_t flags, uint64_t newsp, uint64_t parent_tid, uint64_t tls,
@@ -1002,8 +1033,9 @@ static int64_t dispatch(struct trap_frame *f) {
   case SYS_PRLIMIT64:
     return a3 == 0 ? 0 : zero_user(a3, 128);
   case SYS_SYSINFO:
-  case SYS_UNAME:
     return zero_user(a0 == 0 ? a2 : a0, 128);
+  case SYS_UNAME:
+    return sys_uname(a0);
   case SYS_SET_ROBUST_LIST:
     return cell_set_robust_list_current(a0);
   case SYS_RT_SIGACTION:

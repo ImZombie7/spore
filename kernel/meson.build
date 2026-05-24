@@ -53,9 +53,21 @@ kernel_sources = files(
   'src/vfs.c',
 )
 
+spore_version_conf = configuration_data()
+spore_version_conf.set_quoted('SPORE_UTS_SYSNAME', spore_sysname)
+spore_version_conf.set_quoted('SPORE_UTS_NODENAME', spore_nodename)
+spore_version_conf.set_quoted('SPORE_UTS_RELEASE', spore_release)
+spore_version_conf.set_quoted('SPORE_UTS_VERSION', spore_uts_version)
+spore_version_conf.set_quoted('SPORE_UTS_MACHINE', spore_machine)
+spore_version_conf.set_quoted('SPORE_UTS_DOMAINNAME', spore_domainname)
+configure_file(
+  output: 'spore_version.h',
+  configuration: spore_version_conf)
+
 kernel_elf = executable('kernel.elf',
   kernel_sources,
   include_directories: [
+    include_directories('.'),
     include_directories('src/include'),
   ],
   c_args: kernel_target_args + kernel_c_args,

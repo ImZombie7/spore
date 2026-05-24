@@ -1,4 +1,4 @@
-#include "util.h"
+#include "spore.h"
 
 #include <stdlib.h>
 

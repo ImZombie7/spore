@@ -16,7 +16,7 @@ each tool independently confineable by the policy layer.
 ## Add a Tool
 
 1. Create `userland/bin/<name>/main.c`.
-2. Include `util.h` when you want shared helpers such as `eprintf`,
+2. Include `spore.h` when you want shared helpers such as `eprintf`,
    `usage`, `basename`, or `streq`.
 3. Add `userland/bin/<name>/meson.build` with a `custom_target` matching the
    neighboring tools.
