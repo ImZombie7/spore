@@ -14,46 +14,35 @@ int main(void) {
                                         {
                                           .phys_addr = (uint64_t)(uintptr_t)init_data,
                                           .size = sizeof(init_data),
-                                          .path = "/init",
+                                          .path = "/sbin/init",
                                         }};
 
   struct ramfs fs;
   struct ramfs_file file;
   ramfs_init(&fs, modules, 2, 0);
 
-  assert(ramfs_lookup(&fs, "/init", &file));
+  assert(ramfs_lookup(&fs, "/sbin/init", &file));
   assert(file.data == init_data);
   assert(file.size == sizeof(init_data));
-  assert(strcmp(file.path, "/init") == 0);
+  assert(strcmp(file.path, "/sbin/init") == 0);
   assert(!ramfs_lookup(&fs, "/missing", &file));
 
   struct ramfs_node node;
   assert(ramfs_lookup_node(&fs, "/", &node));
   assert(node.is_dir);
-  assert(ramfs_lookup_node(&fs, "/etc/motd", &node));
-  assert(!node.is_dir);
-  assert(node.size == 17);
-  assert(ramfs_lookup_node(&fs, "/init", &node));
+  assert(ramfs_lookup_node(&fs, "/sbin/init", &node));
   assert(!node.is_dir);
   assert(node.data == init_data);
 
   struct ramfs_dirent ent;
   assert(ramfs_root_dirent(0, &ent));
-  assert(strcmp(ent.name, "bin") == 0 && ent.is_dir);
-  assert(ramfs_root_dirent(1, &ent));
-  assert(strcmp(ent.name, "demos") == 0 && ent.is_dir);
-  assert(ramfs_root_dirent(2, &ent));
   assert(strcmp(ent.name, "dev") == 0 && ent.is_dir);
-  assert(ramfs_root_dirent(3, &ent));
-  assert(strcmp(ent.name, "etc") == 0 && ent.is_dir);
-  assert(ramfs_root_dirent(4, &ent));
+  assert(ramfs_root_dirent(1, &ent));
   assert(strcmp(ent.name, "proc") == 0 && ent.is_dir);
-  assert(ramfs_root_dirent(5, &ent));
+  assert(ramfs_root_dirent(2, &ent));
   assert(strcmp(ent.name, "tmp") == 0 && ent.is_dir);
-  assert(ramfs_root_dirent(6, &ent));
+  assert(ramfs_root_dirent(3, &ent));
   assert(strcmp(ent.name, "run") == 0 && ent.is_dir);
-  assert(ramfs_root_dirent(7, &ent));
-  assert(strcmp(ent.name, "init") == 0 && !ent.is_dir);
   assert(ramfs_lookup_node(&fs, "/dev/null", &node));
   assert(!node.is_dir && node.device == RAMFS_DEV_NULL);
   assert(ramfs_lookup_node(&fs, "/dev/zero", &node));

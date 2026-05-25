@@ -333,13 +333,13 @@ void kernel_main(const struct spore_boot_info *boot_info) {
   syscall_set_ramfs(&boot_ramfs);
   const void *init_data = NULL;
   uint64_t init_size = 0;
-  if (!vfs_lookup_exec("/init", &init_data, &init_size)) {
-    kprintf("[kernel] missing /init\n");
+  if (!vfs_lookup_exec("/sbin/init", &init_data, &init_size)) {
+    kprintf("[kernel] missing /sbin/init\n");
     for (;;) {
       __asm__ volatile("wfe");
     }
   }
-  kprintf("[kernel] loading /init\n");
+  kprintf("[kernel] loading /sbin/init\n");
   char interp_path[128];
   bool has_interp = elf_find_interp_aarch64(init_data, (size_t)init_size, interp_path, sizeof(interp_path));
 
@@ -347,7 +347,7 @@ void kernel_main(const struct spore_boot_info *boot_info) {
   struct loaded_elf elf;
   uint64_t user_sp;
   if (!vmm_user_init(&as, boot->hhdm_offset) || !elf_load_aarch64(&as, init_data, init_size, 0, &elf)) {
-    kprintf("[kernel] failed to prepare /init\n");
+    kprintf("[kernel] failed to prepare /sbin/init\n");
     for (;;) {
       __asm__ volatile("wfe");
     }
@@ -367,7 +367,7 @@ void kernel_main(const struct spore_boot_info *boot_info) {
     elf.at_base = interp.load_base;
   }
   if (!build_initial_stack(&as, &elf, &user_sp)) {
-    kprintf("[kernel] failed to prepare /init\n");
+    kprintf("[kernel] failed to prepare /sbin/init\n");
     for (;;) {
       __asm__ volatile("wfe");
     }

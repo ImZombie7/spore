@@ -8,8 +8,6 @@
 #include "mm/pmm.h"
 #endif
 
-static const char motd[] = "welcome to spore\n";
-
 struct ramfs_backing_page {
   bool used;
   int next;
@@ -226,9 +224,35 @@ static void set_mount(struct ramfs *fs, int index, enum ramfs_mount mount) {
 }
 
 static bool add_ro_file(struct ramfs *fs, const char *path, const void *data, uint64_t size) {
-  int parent;
-  const char *name;
-  if (!split_parent(fs, path, &parent, &name)) { return false; }
+  if (path == NULL || path[0] != '/' || path[1] == '\0') { return false; }
+  int parent = 0;
+  const char *p = path + 1;
+  const char *name = p;
+  while (*p != '\0') {
+    const char *start = p;
+    while (*p != '\0' && *p != '/') {
+      ++p;
+    }
+    size_t len = (size_t)(p - start);
+    if (len == 0 || len > RAMFS_NAME_MAX) { return false; }
+    while (*p == '/') {
+      ++p;
+    }
+    if (*p == '\0') {
+      name = start;
+      break;
+    }
+    char component[RAMFS_NAME_MAX + 1];
+    kmemcpy(component, start, len);
+    component[len] = '\0';
+    int next = find_child(fs, parent, component);
+    if (next < 0) {
+      next = add_node(fs, parent, component, true, true);
+      if (next < 0) { return false; }
+    }
+    if (!fs->nodes[next].is_dir) { return false; }
+    parent = next;
+  }
   int index = add_node(fs, parent, name, false, false);
   if (index < 0) { return false; }
   fs->nodes[index].ro_data = data;
@@ -261,21 +285,20 @@ void ramfs_init(struct ramfs *fs, const struct spore_boot_module *modules, uint3
   fs->nodes[root].mount = RAMFS_MOUNT_RAM0;
   copy_name(fs->nodes[root].name, "");
 
-  (void)add_node(fs, root, "bin", true, true);
-  (void)add_node(fs, root, "demos", true, true);
   int dev = add_node(fs, root, "dev", true, true);
-  (void)add_node(fs, root, "etc", true, true);
   int proc = add_node(fs, root, "proc", true, true);
   int tmp = add_node(fs, root, "tmp", true, true);
   int run = add_node(fs, root, "run", true, true);
+  
   set_mount(fs, dev, RAMFS_MOUNT_DEV);
   set_mount(fs, proc, RAMFS_MOUNT_PROC);
   set_mount(fs, tmp, RAMFS_MOUNT_TMP);
   set_mount(fs, run, RAMFS_MOUNT_RUN);
+  
   (void)add_node(fs, dev, "fs", true, true);
   (void)add_node(fs, dev, "blk", true, true);
   (void)add_node(fs, proc, "net", true, true);
-  (void)add_ro_file(fs, "/etc/motd", motd, sizeof(motd) - 1);
+  
   (void)add_device(fs, "/dev/null", RAMFS_DEV_NULL);
   (void)add_device(fs, "/dev/zero", RAMFS_DEV_ZERO);
   (void)add_device(fs, "/dev/full", RAMFS_DEV_FULL);
@@ -370,10 +393,10 @@ bool ramfs_dirent(const struct ramfs *fs, int dir_index, size_t index, struct ra
 
 bool ramfs_root_dirent(size_t index, struct ramfs_dirent *out) {
   static const struct ramfs_dirent entries[] = {
-    {.name = "bin", .ino = 2, .is_dir = true},  {.name = "demos", .ino = 3, .is_dir = true},
-    {.name = "dev", .ino = 4, .is_dir = true},  {.name = "etc", .ino = 5, .is_dir = true},
-    {.name = "proc", .ino = 6, .is_dir = true}, {.name = "tmp", .ino = 7, .is_dir = true},
-    {.name = "run", .ino = 8, .is_dir = true},  {.name = "init", .ino = 9, .is_dir = false},
+    {.name = "dev", .ino = 2, .is_dir = true},
+    {.name = "proc", .ino = 3, .is_dir = true},
+    {.name = "tmp", .ino = 4, .is_dir = true},
+    {.name = "run", .ino = 5, .is_dir = true},
   };
   if (index >= sizeof(entries) / sizeof(entries[0])) { return false; }
   *out = entries[index];

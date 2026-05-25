@@ -1,4 +1,5 @@
-userland/tests/integration /init
+dir /sbin
+userland/tests/integration /sbin/init
 userland/tests/integration/exec_child.c /bin/exec_child
 userland/etc/motd /etc/motd
 userland/etc/os-release /etc/os-release

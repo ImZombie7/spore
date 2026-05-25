@@ -2,14 +2,18 @@
 dir /home
 dir /root
 dir /etc/mycelium
+dir /sbin
+dir /lib/mycelium
 dir /run/mycelium
 dir /var/log/mycelium
 dir /var/lib/mycelium
 
-userland/bin/init /init
+userland/bin/init /lib/mycelium/init
+symlink /lib/mycelium/init /sbin/init
+userland/bin/myc /lib/mycelium/myc
+symlink /lib/mycelium/myc /sbin/myc
 userland/bin/msh /bin/msh
 userland/bin/dash /bin/dash
-userland/bin/myc /bin/myc
 symlink msh /bin/sh
 
 userland/bin/shutdown /bin/shutdown

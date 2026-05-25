@@ -71,7 +71,7 @@ int main(void) {
   assert(read_u64(sp) == 1);
   uint64_t argv0 = read_u64(sp + 8);
   assert(read_u64(sp + 16) == 0);
-  assert(strcmp((const char *)&stack_mem[stack_offset(argv0)], "/init") == 0);
+  assert(strcmp((const char *)&stack_mem[stack_offset(argv0)], "/sbin/init") == 0);
   assert(read_u64(sp + 24) == 0);
 
   bool saw_phdr = false;

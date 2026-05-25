@@ -131,6 +131,7 @@ static int control_fd = -1;
 static bool shutting_down;
 static const char *start_stack[UNIT_CAP];
 static int start_depth;
+static bool defer_console_start = true;
 
 static const char *state_name(enum unit_state state) {
   switch (state) {
@@ -719,6 +720,7 @@ static int start_unit_name(const char *name, char *err, size_t err_cap) {
     snprintf(err, err_cap, "%s: not found\n", name);
     return -1;
   }
+  if (defer_console_start && streq(unit->name, "console.service")) { return 0; }
   for (int i = 0; i < start_depth; ++i) {
     if (streq(start_stack[i], name)) {
       snprintf(err, err_cap, "dependency cycle at %s\n", name);
@@ -1175,23 +1177,26 @@ static void print_motd(void) {
 }
 
 int main(void) {
-  setenv("PATH", "/bin:/usr/bin:/usr/local/bin:.", 0);
+  setenv("PATH", "/bin:/sbin:/usr/bin:/usr/local/bin:.", 0);
   setenv("HOME", "/root", 0);
   setenv("USER", "root", 0);
   setenv("LOGNAME", "root", 0);
   setenv("SHELL", "/bin/msh", 0);
   setenv("TERM", "xterm-256color", 0);
+  
   ensure_dir("/run/mycelium");
   ensure_dir("/var/log/mycelium");
   ensure_dir("/var/lib/mycelium");
   load_units();
   setup_control_socket();
-  print_motd();
 
   char err[160] = {0};
   (void)start_unit_name("multi-user.target", err, sizeof(err));
   puts("spore: mycelium starting, reached multi-user.target");
+  print_motd();
   fflush(stdout);
+  defer_console_start = false;
+  (void)start_unit_name("console.service", err, sizeof(err));
 
   for (;;) {
     reap_children();

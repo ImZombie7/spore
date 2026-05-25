@@ -284,8 +284,9 @@ static void copy_into_rootfs(const char *src, const char *rootfs, const char *ds
     ensure_dir(parent);
   }
   copy_file(src, out);
-  bool executable = strcmp(dst, "/init") == 0 || strncmp(dst, "/bin/", 5) == 0 || strncmp(dst, "/usr/bin/", 9) == 0 ||
-                    strncmp(dst, "/usr/local/bin/", 15) == 0 || strncmp(dst, "/home/spore/demos/", 18) == 0;
+  bool executable = strncmp(dst, "/bin/", 5) == 0 || strncmp(dst, "/sbin/", 6) == 0 ||
+                    strncmp(dst, "/usr/bin/", 9) == 0 || strncmp(dst, "/usr/local/bin/", 15) == 0 ||
+                    strncmp(dst, "/lib/mycelium/", 14) == 0 || strncmp(dst, "/home/spore/demos/", 18) == 0;
   chmod(out, executable ? 0755 : 0644);
 }
 

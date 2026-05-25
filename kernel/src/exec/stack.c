@@ -44,7 +44,7 @@ static bool stack_write_u64(struct user_address_space *as, uint64_t va, uint64_t
 }
 
 bool build_initial_stack(struct user_address_space *as, const struct loaded_elf *elf, uint64_t *stack_pointer) {
-  const char *argv[] = {"/init"};
+  const char *argv[] = {"/sbin/init"};
   return build_initial_stack_args(as, elf, argv, 1, NULL, 0, stack_pointer);
 }
 

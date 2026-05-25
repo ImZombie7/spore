@@ -618,8 +618,8 @@ bool cell_create_init(struct user_address_space *as, uint64_t entry, uint64_t sp
   domain->pgrp_id = domain->id;
   domain->session_id = domain->id;
   tty_foreground_pgrp = domain->pgrp_id;
-  static const char *init_argv[] = {"/init"};
-  set_domain_identity(domain, "/init", init_argv, 1);
+  static const char *init_argv[] = {"/sbin/init"};
+  set_domain_identity(domain, "/sbin/init", init_argv, 1);
   domain->as = *as;
   domain->as.asid = 0;
   vma_list_init(&domain->vmas);
