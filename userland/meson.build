@@ -29,6 +29,7 @@ subdir('lib/spore')
 
 subdir('bin/init')
 subdir('bin/msh')
+subdir('bin/dash')
 subdir('bin/shutdown')
 subdir('bin/ls')
 subdir('bin/cat')

@@ -46,6 +46,7 @@ enum wait_reason {
   WAIT_FUTEX,
   WAIT_POLL,
   WAIT_SLEEP,
+  WAIT_VFORK,
 };
 
 enum cell_state {
@@ -101,6 +102,8 @@ struct cpu_budget {
 struct domain {
   int id;
   int parent_id;
+  int pgrp_id;
+  int session_id;
   uint16_t refcount;
   bool used;
   bool zombie;
@@ -205,8 +208,15 @@ void cell_exit_thread_current(int status, struct trap_frame *frame);
 void cell_exit_group_current(int status, struct trap_frame *frame);
 void cell_signal_current(int signal, struct trap_frame *frame);
 int cell_fork_current(struct trap_frame *frame);
+int cell_vfork_current(struct trap_frame *frame);
 int cell_clone_thread_current(struct trap_frame *frame, uint64_t flags, uint64_t newsp, uint64_t parent_tid,
                               uint64_t tls, uint64_t child_tid);
+int cell_getpgid(int pid);
+int cell_setpgid(int pid, int pgid);
+int cell_getsid(int pid);
+int cell_setsid_current(void);
+int cell_tty_foreground_pgrp(void);
+int cell_tty_set_foreground_pgrp(int pgid);
 int cell_set_tid_address_current(uint64_t clear_child_tid);
 int cell_set_robust_list_current(uint64_t robust_list);
 int cell_futex_wait_current(uint64_t uaddr, uint32_t expected, struct trap_frame *frame);

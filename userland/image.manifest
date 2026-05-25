@@ -4,6 +4,7 @@ dir /root
 
 userland/bin/init /init
 userland/bin/msh /bin/msh
+userland/bin/dash /bin/dash
 symlink msh /bin/sh
 
 userland/bin/shutdown /bin/shutdown
@@ -108,6 +109,7 @@ userland/lib/ncurses/terminfo/x/xterm-256color /usr/share/terminfo/x/xterm-256co
 userland/usr/local/htoprc /usr/local/htoprc
 userland/etc/motd /etc/motd
 userland/etc/profile /etc/profile
+userland/etc/dashrc /etc/dashrc
 userland/etc/os-release /etc/os-release
 
 userland/etc/fastfetch/config.jsonc /etc/fastfetch/config.jsonc

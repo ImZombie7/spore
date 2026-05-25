@@ -13,3 +13,6 @@
 [submodule "userland/third_party/vim"]
 	path = userland/third_party/vim
 	url = https://github.com/vim/vim.git
+[submodule "userland/third_party/dash"]
+	path = userland/third_party/dash
+	url = https://git.kernel.org/pub/scm/utils/dash/dash.git

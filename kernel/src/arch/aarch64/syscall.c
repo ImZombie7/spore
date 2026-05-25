@@ -70,6 +70,10 @@ enum {
   SYS_RT_SIGPROCMASK = 135,
   SYS_SETGID = 144,
   SYS_SETUID = 146,
+  SYS_SET_PGID = 154,
+  SYS_GET_PGID = 155,
+  SYS_GET_SID = 156,
+  SYS_SETSID = 157,
   SYS_UNAME = 160,
   SYS_UMASK = 166,
   SYS_GETPID = 172,
@@ -122,6 +126,7 @@ enum {
   CLONE_FS = 0x00000200,
   CLONE_FILES = 0x00000400,
   CLONE_SIGHAND = 0x00000800,
+  CLONE_VFORK = 0x00004000,
   CLONE_THREAD = 0x00010000,
   CLONE_SYSVSEM = 0x00040000,
   CLONE_SETTLS = 0x00080000,
@@ -159,6 +164,8 @@ enum {
   TCSETSF = 0x5404,
   TIOCGWINSZ = 0x5413,
   TIOCSWINSZ = 0x5414,
+  TIOCGPGRP = 0x540F,
+  TIOCSPGRP = 0x5410,
   POLLIN = 0x0001,
   POLLOUT = 0x0004,
   POLLERR = 0x0008,
@@ -969,6 +976,12 @@ static int64_t sys_uname(uint64_t buf) {
 
 static int64_t sys_clone(struct trap_frame *f, uint64_t flags, uint64_t newsp, uint64_t parent_tid, uint64_t tls,
                          uint64_t child_tid) {
+  const uint64_t signal_mask = 0xff;
+  if ((flags & CLONE_VFORK) != 0) {
+    const uint64_t allowed_vfork_flags = CLONE_VM | CLONE_VFORK;
+    if ((flags & ~(allowed_vfork_flags | signal_mask)) != 0 || newsp != 0) { return -(int64_t)ENOSYS; }
+    return cell_vfork_current(f);
+  }
   if ((flags & CLONE_VM) == 0) {
     if (newsp != 0) { return -(int64_t)ENOSYS; }
     return cell_fork_current(f);
@@ -977,7 +990,6 @@ static int64_t sys_clone(struct trap_frame *f, uint64_t flags, uint64_t newsp, u
   const uint64_t allowed_thread_flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
                                         CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID |
                                         CLONE_CHILD_SETTID | CLONE_DETACHED;
-  const uint64_t signal_mask = 0xff;
   if ((flags & ~(allowed_thread_flags | signal_mask)) != 0 || newsp == 0) { return -(int64_t)ENOSYS; }
   return cell_clone_thread_current(f, flags, newsp, parent_tid, tls, child_tid);
 }
@@ -1591,6 +1603,20 @@ static int64_t sys_sched_getaffinity(uint64_t mask, uint64_t len) {
 
 static int64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg) {
   (void)fd;
+  if (request == TIOCGPGRP) {
+    int pgrp = cell_tty_foreground_pgrp();
+    return user_writable(arg, sizeof(pgrp)) && vmm_copy_to_user(active_as(), arg, &pgrp, sizeof(pgrp))
+             ? 0
+             : -(int64_t)EFAULT;
+  }
+  if (request == TIOCSPGRP) {
+    int pgrp = 0;
+    if (!user_readable(arg, sizeof(pgrp)) || !vmm_copy_from_user(active_as(), &pgrp, arg, sizeof(pgrp))) {
+      return -(int64_t)EFAULT;
+    }
+    int rc = cell_tty_set_foreground_pgrp(pgrp);
+    return rc == 0 ? 0 : (int64_t)rc;
+  }
   if (request == TIOCGWINSZ) {
     uint16_t rows = 0;
     uint16_t cols = 0;
@@ -1707,6 +1733,10 @@ static int64_t dispatch(struct trap_frame *f) {
     [SYS_RT_SIGPROCMASK] = &&l_zero,
     [SYS_SETGID] = &&l_setgid,
     [SYS_SETUID] = &&l_setuid,
+    [SYS_SET_PGID] = &&l_setpgid,
+    [SYS_GET_PGID] = &&l_getpgid,
+    [SYS_GET_SID] = &&l_getsid,
+    [SYS_SETSID] = &&l_setsid,
     [SYS_UNAME] = &&l_uname,
     [SYS_UMASK] = &&l_umask,
     [SYS_GETPID] = &&l_getpid,
@@ -1811,6 +1841,14 @@ l_getppid:
   return cell_current_ppid();
 l_gettid:
   return cell_current_tid();
+l_setpgid:
+  return cell_setpgid((int)a0, (int)a1);
+l_getpgid:
+  return cell_getpgid((int)a0);
+l_getsid:
+  return cell_getsid((int)a0);
+l_setsid:
+  return cell_setsid_current();
 l_getuid:
   return cell_current_uid();
 l_geteuid:

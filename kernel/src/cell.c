@@ -37,10 +37,12 @@ static char tty_prompt[256];
 static size_t tty_prompt_len;
 static bool tty_prompt_active;
 static volatile bool scheduler_waiting_for_interrupt;
+static int tty_foreground_pgrp;
 
 static size_t domain_resident_pages(const struct domain *domain);
 static void wake_poll_waiters(void);
 static void wake_sleep_waiters(void);
+static void wake_vfork_parent_of(int child_id);
 
 enum {
   CELL_O_ACCMODE = 3,
@@ -234,6 +236,8 @@ static struct domain *alloc_domain(void) {
       domains[i].used = true;
       domains[i].refcount = 0;
       domains[i].id = next_domain_id++;
+      domains[i].pgrp_id = domains[i].id;
+      domains[i].session_id = domains[i].id;
       domains[i].uid = 0;
       domains[i].euid = 0;
       domains[i].gid = 0;
@@ -339,6 +343,8 @@ static void copy_domain_metadata(struct domain *dst, const struct domain *src) {
   dst->euid = src->euid;
   dst->gid = src->gid;
   dst->egid = src->egid;
+  dst->pgrp_id = src->pgrp_id;
+  dst->session_id = src->session_id;
   dst->start_ticks = scheduler_ticks;
   dst->cpu_ticks = 0;
 }
@@ -449,6 +455,7 @@ static void cleanup_robust_list(struct thread *thread) {
 }
 
 static void wake_parent_of(struct domain *child) {
+  wake_vfork_parent_of(child->id);
   struct domain *parent_domain = find_domain(child->parent_id);
   struct thread *parent = parent_domain == NULL ? NULL : thread_for_domain(parent_domain);
   if (parent != NULL && parent->state == THREAD_BLOCKED && parent->wait_reason == WAIT_CHILD &&
@@ -467,6 +474,17 @@ static void wake_parent_of(struct domain *child) {
   }
 }
 
+static void wake_vfork_parent_of(int child_id) {
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    struct thread *thread = &threads[i];
+    if (thread->state == THREAD_BLOCKED && thread->wait_reason == WAIT_VFORK && thread->wait_target == child_id) {
+      thread->state = THREAD_RUNNABLE;
+      thread->wait_reason = WAIT_NONE;
+      thread->wait_target = -1;
+    }
+  }
+}
+
 void cell_system_init(uint64_t hhdm_offset) {
   (void)hhdm_offset;
   kmemset(domains, 0, sizeof(domains));
@@ -480,6 +498,7 @@ void cell_system_init(uint64_t hhdm_offset) {
   scheduler_ticks = 0;
   scheduler_idle_ticks = 0;
   scheduler_waiting_for_interrupt = false;
+  tty_foreground_pgrp = 0;
   // v2 Phase A object model: domains own isolation/policy state, threads own
   // EL0 execution state. The kernel remains run-to-completion on one core, so
   // these tables intentionally have no locks until a later SMP/preemptive goal.
@@ -494,6 +513,9 @@ bool cell_create_init(struct user_address_space *as, uint64_t entry, uint64_t sp
     return false;
   }
   domain->parent_id = 0;
+  domain->pgrp_id = domain->id;
+  domain->session_id = domain->id;
+  tty_foreground_pgrp = domain->pgrp_id;
   static const char *init_argv[] = {"/init"};
   set_domain_identity(domain, "/init", init_argv, 1);
   domain->as = *as;
@@ -536,6 +558,50 @@ int cell_current_tid(void) {
 int cell_current_ppid(void) {
   struct domain *domain = current_domain();
   return domain == NULL ? 0 : domain->parent_id;
+}
+
+int cell_getpgid(int pid) {
+  struct domain *domain = pid == 0 ? current_domain() : find_domain(pid);
+  return domain == NULL ? -ESRCH : domain->pgrp_id;
+}
+
+int cell_setpgid(int pid, int pgid) {
+  struct domain *current = current_domain();
+  if (current == NULL) { return -ESRCH; }
+  struct domain *target = pid == 0 ? current : find_domain(pid);
+  if (target == NULL) { return -ESRCH; }
+  if (target != current && target->parent_id != current->id) { return -EPERM; }
+  if (pgid == 0) { pgid = target->id; }
+  if (pgid < 0) { return -EINVAL; }
+  target->pgrp_id = pgid;
+  return 0;
+}
+
+int cell_getsid(int pid) {
+  struct domain *domain = pid == 0 ? current_domain() : find_domain(pid);
+  return domain == NULL ? -ESRCH : domain->session_id;
+}
+
+int cell_setsid_current(void) {
+  struct domain *domain = current_domain();
+  if (domain == NULL) { return -ESRCH; }
+  if (domain->pgrp_id == domain->id) { return -EPERM; }
+  domain->session_id = domain->id;
+  domain->pgrp_id = domain->id;
+  tty_foreground_pgrp = domain->pgrp_id;
+  return domain->session_id;
+}
+
+int cell_tty_foreground_pgrp(void) {
+  struct domain *domain = current_domain();
+  if (tty_foreground_pgrp == 0 && domain != NULL) { tty_foreground_pgrp = domain->pgrp_id; }
+  return tty_foreground_pgrp;
+}
+
+int cell_tty_set_foreground_pgrp(int pgid) {
+  if (pgid <= 0) { return -EINVAL; }
+  tty_foreground_pgrp = pgid;
+  return 0;
 }
 
 uint32_t cell_current_uid(void) {
@@ -860,6 +926,16 @@ int cell_fork_current(struct trap_frame *frame) {
   return child_domain->id;
 }
 
+int cell_vfork_current(struct trap_frame *frame) {
+  int child_id = cell_fork_current(frame);
+  if (child_id < 0) { return child_id; }
+  current_thread->state = THREAD_BLOCKED;
+  current_thread->wait_reason = WAIT_VFORK;
+  current_thread->wait_target = child_id;
+  cell_schedule(frame);
+  return CELL_SWITCHED;
+}
+
 int cell_clone_thread_current(struct trap_frame *frame, uint64_t flags, uint64_t newsp, uint64_t parent_tid,
                               uint64_t tls, uint64_t child_tid) {
   struct domain *domain = current_domain();
@@ -968,6 +1044,31 @@ int cell_wait4(int pid, uint64_t status_addr, struct trap_frame *frame) {
 }
 
 int cell_kill(int pid, int signal) {
+  if (pid == 0 || pid < -1) {
+    int pgrp = pid == 0 ? cell_getpgid(0) : -pid;
+    int delivered = 0;
+    for (size_t i = 0; i < MAX_DOMAINS; ++i) {
+      if (domains[i].used && !domains[i].zombie && domains[i].pgrp_id == pgrp) {
+        if (signal == 0) {
+          ++delivered;
+          continue;
+        }
+        if (signal != SIGTERM && signal != SIGINT && signal != SIGKILL && signal != SIGSEGV) {
+          ++delivered;
+          continue;
+        }
+        domains[i].exit_status = 128 + signal;
+        domains[i].term_signal = signal;
+        domains[i].zombie = true;
+        for (size_t t = 0; t < MAX_THREADS; ++t) {
+          if (threads[t].domain == &domains[i]) { threads[t].state = THREAD_ZOMBIE; }
+        }
+        wake_parent_of(&domains[i]);
+        ++delivered;
+      }
+    }
+    return delivered == 0 ? -ESRCH : 0;
+  }
   struct domain *domain = find_domain(pid);
   if (domain == NULL || domain->zombie) { return -ESRCH; }
   if (signal == 0) { return 0; }
@@ -1008,6 +1109,7 @@ bool cell_exec_replace(struct user_address_space *as, struct vma_list *vmas, uin
   current_thread->tf = *frame;
   current_thread->tpidr_el0 = 0;
   __asm__ volatile("msr tpidr_el0, %0" : : "r"(0ull));
+  wake_vfork_parent_of(domain->id);
   return true;
 }
 
@@ -1088,6 +1190,8 @@ static const char *wait_reason_text(enum wait_reason reason) {
     return "poll";
   case WAIT_SLEEP:
     return "sleep";
+  case WAIT_VFORK:
+    return "vfork";
   }
   return "?";
 }
