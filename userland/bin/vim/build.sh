@@ -11,12 +11,14 @@ build=$2
 out=$3
 
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+cleaner="$build/elf-clean-runpath"
 nc_inst="$build/../../lib/ncurses/ncurses-install"
 vim_src="$root/userland/third_party/vim"
 vim_work="$build/vim-src"
 
 mkdir -p "$build"
 test -f "$nc_inst/lib/libncurses.so.6.4"
+cc "$root/tools/src/elf_clean_runpath.c" -o "$cleaner"
 
 rm -rf "$vim_work"
 mkdir -p "$vim_work"
@@ -54,3 +56,4 @@ git -C "$vim_src" archive --format=tar HEAD | tar -x -C "$vim_work"
 )
 make -C "$vim_work/src" -j"$jobs" vim >/dev/null
 aarch64-unknown-linux-musl-strip -o "$out" "$vim_work/src/vim"
+"$cleaner" "$out"

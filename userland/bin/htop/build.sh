@@ -11,12 +11,14 @@ build=$2
 out=$3
 
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+cleaner="$build/elf-clean-runpath"
 nc_inst="$build/../../lib/ncurses/ncurses-install"
 ht_src="$root/userland/third_party/htop"
 ht_build="$build/htop-build"
 
 mkdir -p "$build"
 test -f "$nc_inst/lib/libncurses.so.6.4"
+cc "$root/tools/src/elf_clean_runpath.c" -o "$cleaner"
 
 if [ ! -f "$ht_src/configure" ]; then
   (cd "$ht_src" && ./autogen.sh >/dev/null)
@@ -43,3 +45,4 @@ mkdir -p "$ht_build"
 )
 make -C "$ht_build" -j"$jobs" htop >/dev/null
 aarch64-unknown-linux-musl-strip -o "$out" "$ht_build/htop"
+"$cleaner" "$out"

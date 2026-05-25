@@ -11,6 +11,7 @@ build=$2
 out=$3
 
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+cleaner="$build/elf-clean-runpath"
 nc_inst="$build/../../lib/ncurses/ncurses-install"
 nano_src="$root/userland/third_party/nano"
 nano_work="$build/nano-src"
@@ -22,6 +23,7 @@ gnulib_cache="$build/gnulib-cache"
 
 mkdir -p "$build"
 test -f "$nc_inst/lib/libncurses.so.6.4"
+cc "$root/tools/src/elf_clean_runpath.c" -o "$cleaner"
 
 rm -rf "$nano_work" "$nano_build" "$wrap_dir" "$aclocal_extra"
 mkdir -p "$nano_work" "$nano_build" "$wrap_dir" "$aclocal_extra"
@@ -75,3 +77,4 @@ chmod +x "$wrap_dir/aclocal"
 )
 make -C "$nano_build" -j"$jobs" >/dev/null
 aarch64-unknown-linux-musl-strip -o "$out" "$nano_build/src/nano"
+"$cleaner" "$out"

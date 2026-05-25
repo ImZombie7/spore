@@ -11,6 +11,7 @@ build=$2
 out=$3
 
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+cleaner="$build/elf-clean-runpath"
 nc_src="$root/userland/third_party/ncurses"
 nc_build="$build/ncurses-build"
 nc_inst="$build/ncurses-install"
@@ -18,6 +19,7 @@ terminfo_dir="$build/terminfo"
 
 rm -rf "$nc_build" "$nc_inst" "$terminfo_dir"
 mkdir -p "$nc_build" "$nc_inst"
+cc "$root/tools/src/elf_clean_runpath.c" -o "$cleaner"
 (
   cd "$nc_build"
   "$nc_src/configure" \
@@ -42,6 +44,7 @@ mkdir -p "$nc_build" "$nc_inst"
 make -C "$nc_build" -j"$jobs" libs >/dev/null
 make -C "$nc_build" -j1 install.libs install.includes >/dev/null
 aarch64-unknown-linux-musl-strip -o "$out" "$nc_inst/lib/libncurses.so.6.4"
+"$cleaner" "$out"
 
 mkdir -p "$terminfo_dir"
 if command -v infocmp >/dev/null 2>&1 && command -v tic >/dev/null 2>&1; then
