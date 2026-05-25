@@ -6,9 +6,6 @@
 #include <termios.h>
 #include <unistd.h>
 
-static char history[HISTORY_CAP][LINE_CAP];
-static size_t history_len;
-
 static bool path_has_prefix_dir(const char *path, const char *prefix) {
   size_t n = strlen(prefix);
   return n > 0 && strncmp(path, prefix, n) == 0 && (path[n] == '\0' || path[n] == '/');
@@ -150,18 +147,6 @@ static void redraw_input(const char *prompt, const char *line, size_t len, size_
   fflush(stdout);
 }
 
-static void history_add(const char *line) {
-  if (line[0] == '\0') { return; }
-  if (history_len > 0 && strcmp(history[history_len - 1], line) == 0) { return; }
-  if (history_len == HISTORY_CAP) {
-    for (size_t i = 1; i < history_len; ++i) {
-      memcpy(history[i - 1], history[i], sizeof(history[0]));
-    }
-    --history_len;
-  }
-  snprintf(history[history_len++], sizeof(history[0]), "%s", line);
-}
-
 static int read_fallback_line(const char *prompt, char *buf, size_t cap) {
   fputs(prompt, stdout);
   fflush(stdout);
@@ -213,7 +198,7 @@ static int read_prompt_line(const char *prompt, char *buf, size_t cap, bool use_
   buf[0] = '\0';
   size_t len = 0;
   size_t cursor = 0;
-  size_t history_cursor = history_len;
+  size_t history_cursor = sh_history_count();
   fputs(prompt, stdout);
   fflush(stdout);
 
@@ -225,7 +210,6 @@ static int read_prompt_line(const char *prompt, char *buf, size_t cap, bool use_
     }
     if (c == '\r' || c == '\n') {
       putchar('\n');
-      if (use_history) { history_add(buf); }
       (void)tcsetattr(STDIN_FILENO, TCSANOW, &saved);
       return 0;
     }
@@ -245,11 +229,12 @@ static int read_prompt_line(const char *prompt, char *buf, size_t cap, bool use_
       if (read(STDIN_FILENO, &seq[0], 1) <= 0 || read(STDIN_FILENO, &seq[1], 1) <= 0) { continue; }
       if (seq[0] != '[') { continue; }
       if (seq[1] == 'A' && use_history && history_cursor > 0) {
-        replace_line(buf, cap, &len, &cursor, history[--history_cursor]);
+        replace_line(buf, cap, &len, &cursor, sh_history_get(--history_cursor));
         redraw_input(prompt, buf, len, cursor);
-      } else if (seq[1] == 'B' && use_history && history_cursor < history_len) {
+      } else if (seq[1] == 'B' && use_history && history_cursor < sh_history_count()) {
         ++history_cursor;
-        replace_line(buf, cap, &len, &cursor, history_cursor == history_len ? "" : history[history_cursor]);
+        replace_line(buf, cap, &len, &cursor,
+                     history_cursor == sh_history_count() ? "" : sh_history_get(history_cursor));
         redraw_input(prompt, buf, len, cursor);
       } else if (seq[1] == 'C' && cursor < len) {
         ++cursor;
@@ -328,5 +313,6 @@ int sh_read_line(char *buf, size_t cap) {
       return 0;
     }
   }
+  sh_history_add(buf);
   return 0;
 }

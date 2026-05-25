@@ -1,7 +1,7 @@
 #include "msh.h"
 
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 int main(void) {
@@ -14,6 +14,7 @@ int main(void) {
   (void)chdir(home);
   char cwd[128];
   if (getcwd(cwd, sizeof(cwd)) != NULL) { setenv("PWD", cwd, 1); }
+  sh_history_load();
 
   char startup[256];
   if (snprintf(startup, sizeof(startup), "%s/.profile", home) > 0) { last = sh_source_file(startup, last, false); }
