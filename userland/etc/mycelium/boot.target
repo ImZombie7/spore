@@ -1,0 +1,6 @@
+[Unit]
+Description=early boot synchronization point
+Wants=multi-user.target
+
+[Install]
+WantedBy=multi-user.target

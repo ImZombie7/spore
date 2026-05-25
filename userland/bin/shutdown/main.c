@@ -1,18 +1,16 @@
 #include <errno.h>
 #include <spore.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/syscall.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
 #ifndef SYS_pselect6
 #define SYS_pselect6 72
 #endif
-
-#define SYS_SPORE_SHUTDOWN 0x4006
 
 static int parse_delay(const char *arg, unsigned long *seconds) {
   if (streq(arg, "now")) {
@@ -45,6 +43,32 @@ static int sleep_seconds(unsigned long seconds) {
   return 0;
 }
 
+static int mycelium_poweroff(void) {
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) {
+    perror("shutdown: socket");
+    return -1;
+  }
+  struct sockaddr_un sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sun_family = AF_UNIX;
+  snprintf(sa.sun_path, sizeof(sa.sun_path), "/run/mycelium.sock");
+  if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+    perror("shutdown: connect /run/mycelium.sock");
+    close(fd);
+    return -1;
+  }
+  (void)write(fd, "poweroff\n", 9);
+  char buf[256];
+  for (;;) {
+    ssize_t n = read(fd, buf, sizeof(buf));
+    if (n <= 0) { break; }
+    (void)write(STDOUT_FILENO, buf, (size_t)n);
+  }
+  close(fd);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   unsigned long delay = 0;
   if (argc > 2 || (argc == 2 && streq(argv[1], "--help"))) { return usage("shutdown", "[now|SECONDS]"); }
@@ -61,9 +85,8 @@ int main(int argc, char **argv) {
     if (sleep_seconds(delay) != 0) { return EXIT_FAILURE; }
   }
 
-  if (syscall(SYS_SPORE_SHUTDOWN) < 0) {
-    perror("shutdown");
-    return EXIT_FAILURE;
+  if (mycelium_poweroff() != 0) { return EXIT_FAILURE; }
+  for (;;) {
+    pause();
   }
-  for (;;) {}
 }

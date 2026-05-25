@@ -9,6 +9,10 @@ userland_image_data += files(
   'motd',
   'profile',
   'dashrc',
+  'mycelium/boot.target',
+  'mycelium/multi-user.target',
+  'mycelium/shutdown.target',
+  'mycelium/console.service',
   'fastfetch/config.jsonc',
   'fastfetch/spore.logo',
 ) + userland_os_release

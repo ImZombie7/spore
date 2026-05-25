@@ -1,0 +1,6 @@
+[Unit]
+Description=normal interactive multi-user boot
+Wants=console.service
+
+[Install]
+WantedBy=boot.target

@@ -1,13 +1,19 @@
 # source baked-path
 dir /home
 dir /root
+dir /etc/mycelium
+dir /run/mycelium
+dir /var/log/mycelium
+dir /var/lib/mycelium
 
 userland/bin/init /init
 userland/bin/msh /bin/msh
 userland/bin/dash /bin/dash
+userland/bin/myc /bin/myc
 symlink msh /bin/sh
 
 userland/bin/shutdown /bin/shutdown
+userland/bin/reboot /bin/reboot
 userland/bin/ls /bin/ls
 userland/bin/cat /bin/cat
 userland/bin/echo /bin/echo
@@ -118,6 +124,11 @@ userland/etc/motd /etc/motd
 userland/etc/profile /etc/profile
 userland/etc/dashrc /etc/dashrc
 userland/etc/os-release /etc/os-release
+
+userland/etc/mycelium/boot.target /etc/mycelium/boot.target
+userland/etc/mycelium/multi-user.target /etc/mycelium/multi-user.target
+userland/etc/mycelium/shutdown.target /etc/mycelium/shutdown.target
+userland/etc/mycelium/console.service /etc/mycelium/console.service
 
 userland/etc/fastfetch/config.jsonc /etc/fastfetch/config.jsonc
 userland/etc/fastfetch/spore.logo /etc/fastfetch/spore.logo

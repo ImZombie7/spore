@@ -105,3 +105,10 @@ test_ipc_model = executable('test_ipc_model',
   native: true)
 
 test('ipc-model', test_ipc_model)
+
+test_mycelium_model = executable('test_mycelium_model',
+  files('test_mycelium_model.c'),
+  include_directories: test_include,
+  native: true)
+
+test('mycelium-model', test_mycelium_model)
