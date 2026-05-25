@@ -8,6 +8,8 @@ static const char *type_name(mode_t mode) {
   if (S_ISDIR(mode)) { return "directory"; }
   if (S_ISCHR(mode)) { return "character special file"; }
   if (S_ISBLK(mode)) { return "block special file"; }
+  if (S_ISFIFO(mode)) { return "fifo"; }
+  if (S_ISSOCK(mode)) { return "socket"; }
   return "special file";
 }
 

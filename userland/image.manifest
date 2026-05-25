@@ -72,6 +72,7 @@ userland/bin/sha1sum /bin/sha1sum
 userland/bin/readlink /bin/readlink
 userland/bin/time /bin/time
 userland/bin/mk /bin/mk
+userland/bin/mkfifo /bin/mkfifo
 userland/bin/mkdir /bin/mkdir
 userland/bin/rm /bin/rm
 userland/bin/touch /bin/touch
@@ -84,6 +85,8 @@ userland/bin/ping /bin/ping
 userland/bin/udp-echo /bin/udp-echo
 userland/bin/udp-send /bin/udp-send
 userland/bin/udp-recv /bin/udp-recv
+userland/bin/uds-server /bin/uds-server
+userland/bin/uds-client /bin/uds-client
 
 userland/demos/spinner /home/spore/demos/spinner
 userland/demos/peeker /home/spore/demos/peeker

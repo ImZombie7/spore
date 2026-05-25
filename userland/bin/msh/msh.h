@@ -22,6 +22,7 @@ enum token_type {
   TOK_BG,
   TOK_AND,
   TOK_OR,
+  TOK_PIPE,
   TOK_SEMI,
   TOK_GT,
   TOK_GTGT,

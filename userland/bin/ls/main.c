@@ -66,6 +66,10 @@ static void format_mode(mode_t mode, char out[11]) {
     out[0] = 'c';
   } else if (S_ISBLK(mode)) {
     out[0] = 'b';
+  } else if (S_ISFIFO(mode)) {
+    out[0] = 'p';
+  } else if (S_ISSOCK(mode)) {
+    out[0] = 's';
   }
   const mode_t masks[] = {0400, 0200, 0100, 0040, 0020, 0010, 0004, 0002, 0001};
   const char chars[] = {'r', 'w', 'x', 'r', 'w', 'x', 'r', 'w', 'x'};

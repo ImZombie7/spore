@@ -93,6 +93,11 @@ int sh_tokenize(char *line, struct token *tokens, size_t *count, int last_status
       p += 2;
       continue;
     }
+    if (*p == '|') {
+      if (!token_add(tokens, count, TOK_PIPE, NULL)) { return -1; }
+      ++p;
+      continue;
+    }
     if (*p == ';') {
       if (!token_add(tokens, count, TOK_SEMI, NULL)) { return -1; }
       ++p;
@@ -113,8 +118,8 @@ int sh_tokenize(char *line, struct token *tokens, size_t *count, int last_status
     char word[WORD_CAP] = {0};
     size_t len = 0;
     bool tilde_eligible = false;
-    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' && *p != ';' && *p != '&' && *p != '<' &&
-           *p != '>' && !(*p == '&' && p[1] == '&') && !(*p == '|' && p[1] == '|')) {
+    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' && *p != ';' && *p != '&' && *p != '|' &&
+           *p != '<' && *p != '>' && !(*p == '&' && p[1] == '&')) {
       if (*p == '\'') {
         ++p;
         while (*p != '\0' && *p != '\'') {
@@ -170,7 +175,7 @@ struct token *sh_parser_take(struct parser *p) {
 int sh_parse_command(struct parser *p, struct command *cmd) {
   memset(cmd, 0, sizeof(*cmd));
   while (sh_parser_peek(p) != TOK_END && sh_parser_peek(p) != TOK_AND && sh_parser_peek(p) != TOK_OR &&
-         sh_parser_peek(p) != TOK_SEMI && sh_parser_peek(p) != TOK_BG) {
+         sh_parser_peek(p) != TOK_PIPE && sh_parser_peek(p) != TOK_SEMI && sh_parser_peek(p) != TOK_BG) {
     struct token *tok = sh_parser_take(p);
     if (tok->type == TOK_WORD) {
       if (cmd->argc + 1 >= ARG_CAP) {

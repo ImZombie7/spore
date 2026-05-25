@@ -267,9 +267,11 @@ void ramfs_init(struct ramfs *fs, const struct spore_boot_module *modules, uint3
   (void)add_node(fs, root, "etc", true, true);
   int proc = add_node(fs, root, "proc", true, true);
   int tmp = add_node(fs, root, "tmp", true, true);
+  int run = add_node(fs, root, "run", true, true);
   set_mount(fs, dev, RAMFS_MOUNT_DEV);
   set_mount(fs, proc, RAMFS_MOUNT_PROC);
   set_mount(fs, tmp, RAMFS_MOUNT_TMP);
+  set_mount(fs, run, RAMFS_MOUNT_RUN);
   (void)add_node(fs, dev, "fs", true, true);
   (void)add_node(fs, dev, "blk", true, true);
   (void)add_node(fs, proc, "net", true, true);
@@ -357,6 +359,7 @@ bool ramfs_dirent(const struct ramfs *fs, int dir_index, size_t index, struct ra
         out->ino = fs->nodes[i].ino;
         out->is_dir = fs->nodes[i].is_dir;
         out->is_device = fs->nodes[i].device != RAMFS_DEV_NONE && fs->nodes[i].mount == RAMFS_MOUNT_DEV;
+        out->type = (uint8_t)((fs->nodes[i].mode & 0170000u) >> 12);
         return true;
       }
       ++seen;
@@ -367,10 +370,10 @@ bool ramfs_dirent(const struct ramfs *fs, int dir_index, size_t index, struct ra
 
 bool ramfs_root_dirent(size_t index, struct ramfs_dirent *out) {
   static const struct ramfs_dirent entries[] = {
-    {.name = "bin", .ino = 2, .is_dir = true},   {.name = "demos", .ino = 3, .is_dir = true},
-    {.name = "dev", .ino = 4, .is_dir = true},   {.name = "etc", .ino = 5, .is_dir = true},
-    {.name = "proc", .ino = 6, .is_dir = true},  {.name = "tmp", .ino = 7, .is_dir = true},
-    {.name = "init", .ino = 8, .is_dir = false},
+    {.name = "bin", .ino = 2, .is_dir = true},  {.name = "demos", .ino = 3, .is_dir = true},
+    {.name = "dev", .ino = 4, .is_dir = true},  {.name = "etc", .ino = 5, .is_dir = true},
+    {.name = "proc", .ino = 6, .is_dir = true}, {.name = "tmp", .ino = 7, .is_dir = true},
+    {.name = "run", .ino = 8, .is_dir = true},  {.name = "init", .ino = 9, .is_dir = false},
   };
   if (index >= sizeof(entries) / sizeof(entries[0])) { return false; }
   *out = entries[index];
@@ -390,6 +393,28 @@ bool ramfs_create(struct ramfs *fs, const char *path, struct ramfs_node *out) {
   const char *name;
   if (!split_parent(fs, path, &parent, &name)) { return false; }
   int index = add_node(fs, parent, name, false, true);
+  return ramfs_refresh_node(fs, index, out);
+}
+
+bool ramfs_mkfifo(struct ramfs *fs, const char *path, uint16_t mode, struct ramfs_node *out) {
+  if (lookup_index(fs, path) >= 0) { return false; }
+  int parent;
+  const char *name;
+  if (!split_parent(fs, path, &parent, &name)) { return false; }
+  int index = add_node(fs, parent, name, false, true);
+  if (index < 0) { return false; }
+  fs->nodes[index].mode = (uint16_t)(0010000u | (mode & 0777u));
+  return ramfs_refresh_node(fs, index, out);
+}
+
+bool ramfs_mksock(struct ramfs *fs, const char *path, uint16_t mode, struct ramfs_node *out) {
+  if (lookup_index(fs, path) >= 0) { return false; }
+  int parent;
+  const char *name;
+  if (!split_parent(fs, path, &parent, &name)) { return false; }
+  int index = add_node(fs, parent, name, false, true);
+  if (index < 0) { return false; }
+  fs->nodes[index].mode = (uint16_t)(0140000u | (mode & 0777u));
   return ramfs_refresh_node(fs, index, out);
 }
 

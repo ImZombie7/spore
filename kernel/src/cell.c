@@ -16,13 +16,21 @@ static struct snapshot snapshots[MAX_SNAPSHOTS];
 static struct open_file open_files[MAX_OPEN_FILES];
 struct pipe_obj {
   bool used;
+  bool had_writer;
   uint16_t readers;
   uint16_t writers;
+  uint64_t fifo_ino;
   uint8_t data[4096];
   uint64_t head;
   uint64_t len;
 };
 static struct pipe_obj pipes[16];
+struct unix_pending_conn {
+  bool used;
+  struct open_file *listener;
+  struct open_file *server_end;
+};
+static struct unix_pending_conn unix_pending[16];
 static struct thread *current_thread;
 static int next_domain_id = 1;
 static int next_thread_id = 1;
@@ -31,6 +39,7 @@ static uint64_t device_rng_state = 0x9e3779b97f4a7c15ull;
 static uint64_t scheduler_ticks;
 static uint64_t scheduler_idle_ticks;
 static uint64_t boot_epoch_sec;
+static bool pipe_waking;
 static uint64_t proc_cache_tick = UINT64_MAX;
 static size_t proc_cache_rss[MAX_DOMAINS];
 static uint32_t tty_lflag = 0000002 | 0000010;
@@ -51,6 +60,8 @@ static int tty_foreground_pgrp;
 
 static size_t domain_resident_pages(const struct domain *domain);
 static void wake_poll_waiters(void);
+static void wake_pipe_waiters(void);
+static void wake_socket_waiters(struct open_file *file);
 static void wake_sleep_waiters(void);
 static void wake_vfork_parent_of(int child_id);
 
@@ -73,6 +84,9 @@ enum {
   EIO = 5,
   ECHILD = 10,
   EPIPE = 32,
+  ENXIO = 6,
+  ECONNREFUSED = 111,
+  EADDRINUSE = 98,
   ESRCH = 3,
   WNOHANG = 1,
   SIGINT = 2,
@@ -83,11 +97,34 @@ enum {
   TTY_ECHO = 0000010,
   ROBUST_LIST_LIMIT = 16,
   FUTEX_OWNER_DIED = 0x40000000u,
+  CELL_S_IFMT = 0170000,
+  CELL_S_IFIFO = 0010000,
 };
 
 static struct pipe_obj *pipe_for_file(struct open_file *file) {
   if (file == NULL || file->type != OPEN_PIPE || file->pipe_id >= sizeof(pipes) / sizeof(pipes[0])) { return NULL; }
   return pipes[file->pipe_id].used ? &pipes[file->pipe_id] : NULL;
+}
+
+static int alloc_pipe_obj(uint64_t fifo_ino) {
+  for (size_t i = 0; i < sizeof(pipes) / sizeof(pipes[0]); ++i) {
+    if (!pipes[i].used) {
+      kmemset(&pipes[i], 0, sizeof(pipes[i]));
+      pipes[i].used = true;
+      pipes[i].fifo_ino = fifo_ino;
+      pipes[i].had_writer = fifo_ino == 0;
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+static int fifo_pipe_for_ino(uint64_t ino, bool create) {
+  if (ino == 0) { return -1; }
+  for (size_t i = 0; i < sizeof(pipes) / sizeof(pipes[0]); ++i) {
+    if (pipes[i].used && pipes[i].fifo_ino == ino) { return (int)i; }
+  }
+  return create ? alloc_pipe_obj(ino) : -1;
 }
 
 static int find_free_fd(struct domain *domain, int start) {
@@ -316,6 +353,18 @@ static void retain_open_file(struct open_file *file) {
   if (file != NULL) { ++file->refcount; }
 }
 
+static void pipe_drop_reader(uint8_t pipe_id) {
+  if (pipe_id >= sizeof(pipes) / sizeof(pipes[0]) || !pipes[pipe_id].used) { return; }
+  if (pipes[pipe_id].readers > 0) { --pipes[pipe_id].readers; }
+  if (pipes[pipe_id].readers == 0 && pipes[pipe_id].writers == 0) { pipes[pipe_id].used = false; }
+}
+
+static void pipe_drop_writer(uint8_t pipe_id) {
+  if (pipe_id >= sizeof(pipes) / sizeof(pipes[0]) || !pipes[pipe_id].used) { return; }
+  if (pipes[pipe_id].writers > 0) { --pipes[pipe_id].writers; }
+  if (pipes[pipe_id].readers == 0 && pipes[pipe_id].writers == 0) { pipes[pipe_id].used = false; }
+}
+
 static void release_open_file(struct open_file *file) {
   if (file == NULL || file->refcount == 0) { return; }
   --file->refcount;
@@ -328,7 +377,21 @@ static void release_open_file(struct open_file *file) {
         --pipe->readers;
       }
       if (pipe->readers == 0 && pipe->writers == 0) { pipe->used = false; }
+      wake_pipe_waiters();
       wake_poll_waiters();
+    } else if (file->type == OPEN_UNIX_STREAM) {
+      pipe_drop_reader(file->unix_rx_pipe);
+      pipe_drop_writer(file->unix_tx_pipe);
+      wake_pipe_waiters();
+      wake_socket_waiters(file);
+      wake_poll_waiters();
+    } else if (file->type == OPEN_UNIX_LISTENER) {
+      for (size_t i = 0; i < sizeof(unix_pending) / sizeof(unix_pending[0]); ++i) {
+        if (unix_pending[i].used && unix_pending[i].listener == file) {
+          release_open_file(unix_pending[i].server_end);
+          unix_pending[i] = (struct unix_pending_conn){0};
+        }
+      }
     }
     file->used = false;
   }
@@ -1135,6 +1198,12 @@ bool cell_exec_replace(struct user_address_space *as, struct vma_list *vmas, uin
       if (domain->refcount > 0) { --domain->refcount; }
     }
   }
+  for (size_t i = 0; i < MAX_FDS; ++i) {
+    if (domain->fds[i] != NULL && (domain->fds[i]->flags & CELL_O_CLOEXEC) != 0) {
+      release_open_file(domain->fds[i]);
+      domain->fds[i] = NULL;
+    }
+  }
   domain->as = *as;
   domain->vmas = *vmas;
   set_domain_identity(domain, path, argv, argc);
@@ -1231,6 +1300,8 @@ static const char *wait_reason_text(enum wait_reason reason) {
     return "sleep";
   case WAIT_VFORK:
     return "vfork";
+  case WAIT_PIPE:
+    return "pipe";
   }
   return "?";
 }
@@ -1615,6 +1686,7 @@ static size_t mounts_text(char *dst, size_t cap) {
   proc_append_str(dst, cap, &len,
                   "ext2-root / ext2 rw 0 0\n"
                   "tmpfs /tmp tmpfs rw 0 0\n"
+                  "runfs /run tmpfs rw 0 0\n"
                   "bootfs /dev/fs/boot fat16 ro 0 0\n"
                   "ramfs /dev/fs/ram0 ramfs ro 0 0\n"
                   "proc /proc proc ro 0 0\n"
@@ -2075,28 +2147,84 @@ bool cell_handle_cow_fault(uint64_t far) {
   return domain != NULL && vmm_handle_cow_fault(&domain->as, far);
 }
 
-int64_t cell_fd_write(int fd, uint64_t buf, uint64_t len) {
+static int64_t pipe_write_id_from_domain(struct domain *domain, uint8_t pipe_id, uint64_t buf, uint64_t len) {
+  if (len == 0) { return 0; }
+  if (pipe_id >= sizeof(pipes) / sizeof(pipes[0]) || !pipes[pipe_id].used) { return -9; }
+  struct pipe_obj *pipe = &pipes[pipe_id];
+  if (pipe->readers == 0) { return -EPIPE; }
+  uint64_t done = 0;
+  while (done < len && pipe->len < sizeof(pipe->data)) {
+    char c;
+    if (!vmm_copy_from_user(&domain->as, &c, buf + done, 1)) { return -EFAULT; }
+    uint64_t tail = (pipe->head + pipe->len) % sizeof(pipe->data);
+    pipe->data[tail] = (uint8_t)c;
+    ++pipe->len;
+    ++done;
+  }
+  if (done != 0) {
+    wake_pipe_waiters();
+    wake_poll_waiters();
+    return (int64_t)done;
+  }
+  return -EAGAIN;
+}
+
+static int64_t pipe_read_id_to_domain(struct domain *domain, uint8_t pipe_id, uint64_t buf, uint64_t len) {
+  if (len == 0) { return 0; }
+  if (pipe_id >= sizeof(pipes) / sizeof(pipes[0]) || !pipes[pipe_id].used) { return -9; }
+  struct pipe_obj *pipe = &pipes[pipe_id];
+  uint64_t done = 0;
+  while (done < len && pipe->len != 0) {
+    char c = (char)pipe->data[pipe->head];
+    pipe->head = (pipe->head + 1u) % sizeof(pipe->data);
+    --pipe->len;
+    if (!vmm_copy_to_user(&domain->as, buf + done, &c, 1)) { return -EFAULT; }
+    ++done;
+  }
+  if (done != 0) {
+    wake_pipe_waiters();
+    wake_poll_waiters();
+    return (int64_t)done;
+  }
+  return pipe->writers == 0 && (pipe->fifo_ino == 0 || pipe->had_writer) ? 0 : -EAGAIN;
+}
+
+static int64_t pipe_write_from_domain(struct domain *domain, struct open_file *file, uint64_t buf, uint64_t len) {
+  if (file == NULL || file->type != OPEN_PIPE || !file->pipe_write_end) { return -9; }
+  return pipe_write_id_from_domain(domain, file->pipe_id, buf, len);
+}
+
+static int64_t pipe_read_to_domain(struct domain *domain, struct open_file *file, uint64_t buf, uint64_t len) {
+  if (file == NULL || file->type != OPEN_PIPE || file->pipe_write_end) { return -9; }
+  return pipe_read_id_to_domain(domain, file->pipe_id, buf, len);
+}
+
+static void block_on_pipe(int fd, uint64_t buf, uint64_t len, bool write, struct trap_frame *frame) {
+  cell_save_current(frame);
+  current_thread->state = THREAD_BLOCKED;
+  current_thread->wait_reason = WAIT_PIPE;
+  current_thread->wait_target = fd;
+  current_thread->pipe_buf = buf;
+  current_thread->pipe_len = len;
+  current_thread->pipe_write = write;
+  cell_schedule(frame);
+}
+
+int64_t cell_fd_write(int fd, uint64_t buf, uint64_t len, struct trap_frame *frame) {
   struct domain *domain = current_domain();
   if (domain == NULL || fd < 0 || fd >= MAX_FDS || domain->fds[fd] == NULL) { return -9; }
   struct open_file *file = domain->fds[fd];
   if (file->type == OPEN_PIPE) {
-    struct pipe_obj *pipe = pipe_for_file(file);
-    if (pipe == NULL || !file->pipe_write_end) { return -9; }
-    if (pipe->readers == 0) { return -EPIPE; }
-    uint64_t done = 0;
-    while (done < len && pipe->len < sizeof(pipe->data)) {
-      char c;
-      if (!vmm_copy_from_user(&domain->as, &c, buf + done, 1)) { return -EFAULT; }
-      uint64_t tail = (pipe->head + pipe->len) % sizeof(pipe->data);
-      pipe->data[tail] = (uint8_t)c;
-      ++pipe->len;
-      ++done;
-    }
-    if (done != 0) {
-      wake_poll_waiters();
-      return (int64_t)done;
-    }
-    return -EAGAIN;
+    int64_t wrote = pipe_write_from_domain(domain, file, buf, len);
+    if (wrote != -EAGAIN || (file->flags & CELL_O_NONBLOCK) != 0 || frame == NULL) { return wrote; }
+    block_on_pipe(fd, buf, len, true, frame);
+    return CELL_SWITCHED;
+  }
+  if (file->type == OPEN_UNIX_STREAM) {
+    int64_t wrote = pipe_write_id_from_domain(domain, file->unix_tx_pipe, buf, len);
+    if (wrote != -EAGAIN || (file->flags & CELL_O_NONBLOCK) != 0 || frame == NULL) { return wrote; }
+    block_on_pipe(fd, buf, len, true, frame);
+    return CELL_SWITCHED;
   }
   if (file->type != OPEN_STDOUT) {
     if (file->type != OPEN_RAMFS ||
@@ -2348,22 +2476,16 @@ int64_t cell_fd_read(int fd, uint64_t buf, uint64_t len, struct trap_frame *fram
   if (domain == NULL || fd < 0 || fd >= MAX_FDS || domain->fds[fd] == NULL) { return -9; }
   struct open_file *file = domain->fds[fd];
   if (file->type == OPEN_PIPE) {
-    (void)frame;
-    struct pipe_obj *pipe = pipe_for_file(file);
-    if (pipe == NULL || file->pipe_write_end) { return -9; }
-    uint64_t done = 0;
-    while (done < len && pipe->len != 0) {
-      char c = (char)pipe->data[pipe->head];
-      pipe->head = (pipe->head + 1u) % sizeof(pipe->data);
-      --pipe->len;
-      if (!vmm_copy_to_user(&domain->as, buf + done, &c, 1)) { return -EFAULT; }
-      ++done;
-    }
-    if (done != 0) {
-      wake_poll_waiters();
-      return (int64_t)done;
-    }
-    return pipe->writers == 0 ? 0 : -EAGAIN;
+    int64_t got = pipe_read_to_domain(domain, file, buf, len);
+    if (got != -EAGAIN || (file->flags & CELL_O_NONBLOCK) != 0 || frame == NULL) { return got; }
+    block_on_pipe(fd, buf, len, false, frame);
+    return CELL_SWITCHED;
+  }
+  if (file->type == OPEN_UNIX_STREAM) {
+    int64_t got = pipe_read_id_to_domain(domain, file->unix_rx_pipe, buf, len);
+    if (got != -EAGAIN || (file->flags & CELL_O_NONBLOCK) != 0 || frame == NULL) { return got; }
+    block_on_pipe(fd, buf, len, false, frame);
+    return CELL_SWITCHED;
   }
   if (file->type == OPEN_STDIN) {
     if (len == 0) { return 0; }
@@ -2409,6 +2531,18 @@ static int fd_poll_events_for_domain(struct domain *domain, int fd, int events) 
     } else if (file->type == OPEN_PIPE) {
       struct pipe_obj *pipe = pipe_for_file(file);
       if (pipe != NULL && !file->pipe_write_end && (pipe->len != 0 || pipe->writers == 0)) { revents |= CELL_POLLIN; }
+    } else if (file->type == OPEN_UNIX_LISTENER) {
+      for (size_t i = 0; i < sizeof(unix_pending) / sizeof(unix_pending[0]); ++i) {
+        if (unix_pending[i].used && unix_pending[i].listener == file) {
+          revents |= CELL_POLLIN;
+          break;
+        }
+      }
+    } else if (file->type == OPEN_UNIX_STREAM) {
+      if (file->unix_rx_pipe < sizeof(pipes) / sizeof(pipes[0]) && pipes[file->unix_rx_pipe].used &&
+          (pipes[file->unix_rx_pipe].len != 0 || pipes[file->unix_rx_pipe].writers == 0)) {
+        revents |= CELL_POLLIN;
+      }
     } else if (file->type == OPEN_RAMFS) {
       revents |= CELL_POLLIN;
     }
@@ -2421,6 +2555,12 @@ static int fd_poll_events_for_domain(struct domain *domain, int fd, int events) 
     } else if (file->type == OPEN_PIPE) {
       struct pipe_obj *pipe = pipe_for_file(file);
       if (pipe != NULL && file->pipe_write_end && pipe->readers != 0 && pipe->len < sizeof(pipe->data)) {
+        revents |= CELL_POLLOUT;
+      }
+    } else if (file->type == OPEN_UNIX_STREAM) {
+      if (file->unix_tx_pipe < sizeof(pipes) / sizeof(pipes[0]) && pipes[file->unix_tx_pipe].used &&
+          pipes[file->unix_tx_pipe].readers != 0 &&
+          pipes[file->unix_tx_pipe].len < sizeof(pipes[file->unix_tx_pipe].data)) {
         revents |= CELL_POLLOUT;
       }
     }
@@ -2525,6 +2665,43 @@ static void wake_poll_waiters(void) {
       clear_poll_wait(thread);
     }
   }
+}
+
+static void clear_pipe_wait(struct thread *thread) {
+  thread->wait_target = -1;
+  thread->pipe_buf = 0;
+  thread->pipe_len = 0;
+  thread->pipe_write = false;
+}
+
+static void wake_pipe_waiters(void) {
+  if (pipe_waking) { return; }
+  pipe_waking = true;
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    struct thread *thread = &threads[i];
+    if (thread->state != THREAD_BLOCKED || thread->wait_reason != WAIT_PIPE || thread->domain == NULL) { continue; }
+    int fd = thread->wait_target;
+    if (fd < 0 || fd >= MAX_FDS || thread->domain->fds[fd] == NULL) {
+      thread->tf.x[0] = (uint64_t)-9;
+    } else {
+      struct open_file *file = thread->domain->fds[fd];
+      int64_t rc;
+      if (file->type == OPEN_UNIX_STREAM) {
+        rc = thread->pipe_write
+               ? pipe_write_id_from_domain(thread->domain, file->unix_tx_pipe, thread->pipe_buf, thread->pipe_len)
+               : pipe_read_id_to_domain(thread->domain, file->unix_rx_pipe, thread->pipe_buf, thread->pipe_len);
+      } else {
+        rc = thread->pipe_write ? pipe_write_from_domain(thread->domain, file, thread->pipe_buf, thread->pipe_len)
+                                : pipe_read_to_domain(thread->domain, file, thread->pipe_buf, thread->pipe_len);
+      }
+      if (rc == -EAGAIN) { continue; }
+      thread->tf.x[0] = (uint64_t)rc;
+    }
+    thread->state = THREAD_RUNNABLE;
+    thread->wait_reason = WAIT_NONE;
+    clear_pipe_wait(thread);
+  }
+  pipe_waking = false;
 }
 
 static void wake_sleep_waiters(void) {
@@ -2641,6 +2818,32 @@ int64_t cell_fd_lseek(int fd, int64_t off, int whence) {
 int cell_fd_open_node(const struct vfs_node *node, uint32_t flags) {
   struct domain *domain = current_domain();
   if (domain == NULL) { return -12; }
+  if ((node->mode & CELL_S_IFMT) == CELL_S_IFIFO) {
+    int pipe_id = fifo_pipe_for_ino(node->ino, true);
+    if (pipe_id < 0) { return -23; }
+    bool write_end = (flags & CELL_O_ACCMODE) == CELL_O_WRONLY;
+    if ((flags & CELL_O_NONBLOCK) != 0 && write_end && pipes[pipe_id].readers == 0) { return -ENXIO; }
+
+    int fd = find_free_fd(domain, 0);
+    if (fd < 0) { return -24; }
+    struct open_file *file = alloc_open_file();
+    if (file == NULL) { return -12; }
+    file->type = OPEN_PIPE;
+    file->flags = flags;
+    file->node = *node;
+    file->pipe_id = (uint8_t)pipe_id;
+    file->pipe_write_end = write_end;
+    if (write_end) {
+      ++pipes[pipe_id].writers;
+      pipes[pipe_id].had_writer = true;
+    } else {
+      ++pipes[pipe_id].readers;
+    }
+    domain->fds[fd] = file;
+    wake_pipe_waiters();
+    wake_poll_waiters();
+    return fd;
+  }
   int fd = -1;
   for (int i = 0; i < MAX_FDS; ++i) {
     if (domain->fds[i] == NULL) {
@@ -2679,6 +2882,141 @@ int cell_fd_socket_inet(uint8_t proto) {
   return fd;
 }
 
+int cell_fd_socket_unix(void) {
+  struct domain *domain = current_domain();
+  if (domain == NULL) { return -12; }
+  int fd = find_free_fd(domain, 0);
+  if (fd < 0) { return -24; }
+  struct open_file *file = alloc_open_file();
+  if (file == NULL) { return -12; }
+  file->type = OPEN_UNIX_STREAM;
+  domain->fds[fd] = file;
+  return fd;
+}
+
+static struct open_file *unix_file_for_fd(struct domain *domain, int fd) {
+  if (domain == NULL || fd < 0 || fd >= MAX_FDS || domain->fds[fd] == NULL) { return NULL; }
+  struct open_file *file = domain->fds[fd];
+  return file->type == OPEN_UNIX_STREAM || file->type == OPEN_UNIX_LISTENER ? file : NULL;
+}
+
+static struct open_file *unix_listener_for_path(const char *path) {
+  for (size_t d = 0; d < MAX_DOMAINS; ++d) {
+    if (!domains[d].used) { continue; }
+    for (size_t fd = 0; fd < MAX_FDS; ++fd) {
+      struct open_file *file = domains[d].fds[fd];
+      if (file != NULL && file->type == OPEN_UNIX_LISTENER && str_eq(file->unix_path, path)) { return file; }
+    }
+  }
+  return NULL;
+}
+
+int cell_fd_unix_bind(int fd, const char *path) {
+  struct open_file *file = unix_file_for_fd(current_domain(), fd);
+  if (file == NULL || file->type != OPEN_UNIX_STREAM || path == NULL || path[0] == '\0') { return -EINVAL; }
+  struct vfs_node node;
+  if (vfs_lookup(path, &node)) { return -EADDRINUSE; }
+  if (!vfs_mksock(path, 0666, &node)) { return -EINVAL; }
+  copy_cstr(file->unix_path, sizeof(file->unix_path), path);
+  file->node = node;
+  return 0;
+}
+
+int cell_fd_unix_listen(int fd, int backlog) {
+  (void)backlog;
+  struct open_file *file = unix_file_for_fd(current_domain(), fd);
+  if (file == NULL || file->type != OPEN_UNIX_STREAM || file->unix_path[0] == '\0') { return -EINVAL; }
+  file->type = OPEN_UNIX_LISTENER;
+  return 0;
+}
+
+static int take_pending_unix(struct domain *domain, struct open_file *listener) {
+  int fd = find_free_fd(domain, 0);
+  if (fd < 0) { return -24; }
+  for (size_t i = 0; i < sizeof(unix_pending) / sizeof(unix_pending[0]); ++i) {
+    if (!unix_pending[i].used || unix_pending[i].listener != listener) { continue; }
+    domain->fds[fd] = unix_pending[i].server_end;
+    unix_pending[i] = (struct unix_pending_conn){0};
+    return fd;
+  }
+  return -EAGAIN;
+}
+
+static void wake_unix_accept_waiters(struct open_file *listener) {
+  for (size_t i = 0; i < MAX_THREADS; ++i) {
+    struct thread *thread = &threads[i];
+    if (thread->state != THREAD_BLOCKED || thread->wait_reason != WAIT_SOCKET || thread->domain == NULL) { continue; }
+    int fd = thread->wait_target;
+    if (fd < 0 || fd >= MAX_FDS || thread->domain->fds[fd] != listener) { continue; }
+    int accepted = take_pending_unix(thread->domain, listener);
+    if (accepted == -EAGAIN) { continue; }
+    thread->tf.x[0] = (uint64_t)accepted;
+    thread->state = THREAD_RUNNABLE;
+    thread->wait_reason = WAIT_NONE;
+    thread->wait_target = -1;
+  }
+  wake_poll_waiters();
+}
+
+int cell_fd_unix_accept(int fd, struct trap_frame *frame) {
+  struct domain *domain = current_domain();
+  struct open_file *listener = unix_file_for_fd(domain, fd);
+  if (listener == NULL || listener->type != OPEN_UNIX_LISTENER) { return -9; }
+  int accepted = take_pending_unix(domain, listener);
+  if (accepted != -EAGAIN) { return accepted; }
+  if ((listener->flags & CELL_O_NONBLOCK) != 0 || frame == NULL) { return -EAGAIN; }
+  cell_save_current(frame);
+  current_thread->state = THREAD_BLOCKED;
+  current_thread->wait_reason = WAIT_SOCKET;
+  current_thread->wait_target = fd;
+  cell_schedule(frame);
+  return CELL_SWITCHED;
+}
+
+int cell_fd_unix_connect(int fd, const char *path) {
+  struct domain *domain = current_domain();
+  struct open_file *client = unix_file_for_fd(domain, fd);
+  if (client == NULL || client->type != OPEN_UNIX_STREAM || path == NULL) { return -9; }
+  struct open_file *listener = unix_listener_for_path(path);
+  if (listener == NULL) { return -ECONNREFUSED; }
+  int c2s = alloc_pipe_obj(0);
+  int s2c = alloc_pipe_obj(0);
+  if (c2s < 0 || s2c < 0) {
+    if (c2s >= 0) { pipes[c2s].used = false; }
+    if (s2c >= 0) { pipes[s2c].used = false; }
+    return -23;
+  }
+  struct open_file *server = alloc_open_file();
+  if (server == NULL) {
+    pipes[c2s].used = false;
+    pipes[s2c].used = false;
+    return -12;
+  }
+  pipes[c2s].readers = 1;
+  pipes[c2s].writers = 1;
+  pipes[s2c].readers = 1;
+  pipes[s2c].writers = 1;
+  client->unix_rx_pipe = (uint8_t)s2c;
+  client->unix_tx_pipe = (uint8_t)c2s;
+  copy_cstr(client->unix_path, sizeof(client->unix_path), path);
+  server->type = OPEN_UNIX_STREAM;
+  server->unix_rx_pipe = (uint8_t)c2s;
+  server->unix_tx_pipe = (uint8_t)s2c;
+  server->node = listener->node;
+  copy_cstr(server->unix_path, sizeof(server->unix_path), path);
+  for (size_t i = 0; i < sizeof(unix_pending) / sizeof(unix_pending[0]); ++i) {
+    if (!unix_pending[i].used) {
+      unix_pending[i] = (struct unix_pending_conn){.used = true, .listener = listener, .server_end = server};
+      wake_unix_accept_waiters(listener);
+      return 0;
+    }
+  }
+  release_open_file(server);
+  pipes[c2s].used = false;
+  pipes[s2c].used = false;
+  return -EAGAIN;
+}
+
 int cell_fd_pipe2(uint64_t pipefd_addr, int flags) {
   if ((flags & ~(CELL_O_CLOEXEC | CELL_O_NONBLOCK)) != 0) { return -EINVAL; }
   struct domain *domain = current_domain();
@@ -2687,13 +3025,7 @@ int cell_fd_pipe2(uint64_t pipefd_addr, int flags) {
   int write_fd = read_fd < 0 ? -1 : find_free_fd(domain, read_fd + 1);
   if (read_fd < 0 || write_fd < 0) { return -24; }
 
-  int pipe_id = -1;
-  for (size_t i = 0; i < sizeof(pipes) / sizeof(pipes[0]); ++i) {
-    if (!pipes[i].used) {
-      pipe_id = (int)i;
-      break;
-    }
-  }
+  int pipe_id = alloc_pipe_obj(0);
   if (pipe_id < 0) { return -23; }
 
   struct open_file *read_file = alloc_open_file();
@@ -2704,8 +3036,6 @@ int cell_fd_pipe2(uint64_t pipefd_addr, int flags) {
     return -12;
   }
 
-  kmemset(&pipes[pipe_id], 0, sizeof(pipes[pipe_id]));
-  pipes[pipe_id].used = true;
   pipes[pipe_id].readers = 1;
   pipes[pipe_id].writers = 1;
 
@@ -2788,8 +3118,15 @@ int64_t cell_fd_udp_send(int fd, uint32_t ip, uint16_t port, uint64_t buf, uint6
 
 int64_t cell_fd_socket_recv(int fd, uint64_t buf, uint64_t len, struct trap_frame *frame) {
   struct domain *domain = current_domain();
-  struct open_file *file = udp_socket_for_fd(domain, fd);
-  if (file == NULL) { return -9; }
+  if (domain == NULL || fd < 0 || fd >= MAX_FDS || domain->fds[fd] == NULL) { return -9; }
+  struct open_file *file = domain->fds[fd];
+  if (file->type == OPEN_UNIX_STREAM) {
+    int64_t got = pipe_read_id_to_domain(domain, file->unix_rx_pipe, buf, len);
+    if (got != -EAGAIN || (file->flags & CELL_O_NONBLOCK) != 0 || frame == NULL) { return got; }
+    block_on_pipe(fd, buf, len, false, frame);
+    return CELL_SWITCHED;
+  }
+  if (file->type != OPEN_SOCKET) { return -9; }
   net_poll();
   if (file->udp_rx_len == 0) {
     if (frame == NULL) { return -EAGAIN; }
@@ -2874,6 +3211,21 @@ int cell_fd_dup(int oldfd, int minfd) {
   return -24;
 }
 
+int cell_fd_dup3(int oldfd, int newfd, int flags) {
+  if ((flags & ~CELL_O_CLOEXEC) != 0) { return -EINVAL; }
+  struct domain *domain = current_domain();
+  if (domain == NULL || oldfd < 0 || oldfd >= MAX_FDS || newfd < 0 || newfd >= MAX_FDS || domain->fds[oldfd] == NULL) {
+    return -9;
+  }
+  if (oldfd == newfd) { return -EINVAL; }
+  struct open_file *file = domain->fds[oldfd];
+  retain_open_file(file);
+  if (domain->fds[newfd] != NULL) { release_open_file(domain->fds[newfd]); }
+  domain->fds[newfd] = file;
+  if ((flags & CELL_O_CLOEXEC) != 0) { file->flags |= CELL_O_CLOEXEC; }
+  return newfd;
+}
+
 int cell_fd_close(int fd) {
   struct domain *domain = current_domain();
   if (domain == NULL || fd < 0 || fd >= MAX_FDS || domain->fds[fd] == NULL) { return -9; }
@@ -2909,6 +3261,16 @@ bool cell_fd_stat(int fd, struct vfs_node *out) {
       .links_count = 1,
       .dev_id = 0x0005,
     };
+    return true;
+  }
+  if (file->type == OPEN_UNIX_STREAM || file->type == OPEN_UNIX_LISTENER) {
+    *out = file->node;
+    if (out->mode == 0) {
+      out->backend = VFS_RAMFS;
+      out->mode = 0140666u;
+      out->links_count = 1;
+      out->dev_id = 0x0012;
+    }
     return true;
   }
   return vfs_refresh(&file->node, out);

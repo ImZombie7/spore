@@ -36,6 +36,7 @@ struct vfs_dirent {
   uint64_t ino;
   bool is_dir;
   bool is_device;
+  uint8_t type;
   char name[256];
 };
 
@@ -62,6 +63,8 @@ bool vfs_lstat(const char *path, struct vfs_node *out);
 bool vfs_lookup_exec(const char *path, const void **data, uint64_t *size);
 bool vfs_mkdir(const char *path);
 bool vfs_create(const char *path, struct vfs_node *out);
+bool vfs_mkfifo(const char *path, uint32_t mode, struct vfs_node *out);
+bool vfs_mksock(const char *path, uint32_t mode, struct vfs_node *out);
 bool vfs_truncate(const struct vfs_node *node, uint64_t size);
 bool vfs_link(const char *old_path, const char *new_path);
 bool vfs_symlink(const char *target, const char *link_path);

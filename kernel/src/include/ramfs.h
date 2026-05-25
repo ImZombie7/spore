@@ -18,6 +18,7 @@ enum ramfs_mount {
   RAMFS_MOUNT_DEV,
   RAMFS_MOUNT_PROC,
   RAMFS_MOUNT_TMP,
+  RAMFS_MOUNT_RUN,
 };
 
 enum ramfs_device {
@@ -105,6 +106,7 @@ struct ramfs_dirent {
   uint64_t ino;
   bool is_dir;
   bool is_device;
+  uint8_t type;
 };
 
 void ramfs_init(struct ramfs *fs, const struct spore_boot_module *modules, uint32_t module_count, uint64_t hhdm_offset);
@@ -114,6 +116,8 @@ bool ramfs_root_dirent(size_t index, struct ramfs_dirent *out);
 bool ramfs_dirent(const struct ramfs *fs, int dir_index, size_t index, struct ramfs_dirent *out);
 bool ramfs_mkdir(struct ramfs *fs, const char *path);
 bool ramfs_create(struct ramfs *fs, const char *path, struct ramfs_node *out);
+bool ramfs_mkfifo(struct ramfs *fs, const char *path, uint16_t mode, struct ramfs_node *out);
+bool ramfs_mksock(struct ramfs *fs, const char *path, uint16_t mode, struct ramfs_node *out);
 bool ramfs_truncate(struct ramfs *fs, int index, uint64_t size);
 bool ramfs_chmod_node(struct ramfs *fs, int index, uint16_t mode);
 bool ramfs_chown_node(struct ramfs *fs, int index, uint32_t uid, uint32_t gid);

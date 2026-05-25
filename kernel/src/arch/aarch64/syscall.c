@@ -24,6 +24,7 @@ enum {
   SYS_DUP3 = 24,
   SYS_FCNTL = 25,
   SYS_IOCTL = 29,
+  SYS_MKNODAT = 33,
   SYS_MKDIRAT = 34,
   SYS_UNLINKAT = 35,
   SYS_SYMLINKAT = 36,
@@ -154,6 +155,8 @@ enum {
   O_CREAT = 0100,
   O_TRUNC = 01000,
   O_APPEND = 02000,
+  S_IFMT = 0170000,
+  S_IFIFO = 0010000,
   F_DUPFD = 0,
   F_GETFD = 1,
   F_SETFD = 2,
@@ -182,7 +185,10 @@ enum {
   DT_REG = 8,
   DT_DIR = 4,
   DT_CHR = 2,
+  DT_FIFO = 1,
+  AF_UNIX = 1,
   AF_INET = 2,
+  SOCK_STREAM = 1,
   SOCK_DGRAM = 2,
   IPPROTO_ICMP = 1,
   IPPROTO_UDP = 17,
@@ -334,6 +340,11 @@ struct sockaddr_in64 {
   uint16_t sin_port;
   uint32_t sin_addr;
   uint8_t sin_zero[8];
+};
+
+struct sockaddr_un64 {
+  uint16_t sun_family;
+  char sun_path[108];
 };
 
 struct termios64 {
@@ -701,9 +712,9 @@ static bool parse_shebang(const void *data, uint64_t size, char *interp, size_t 
   return true;
 }
 
-static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
+static int64_t sys_write(struct trap_frame *frame, uint64_t fd, uint64_t buf, uint64_t len) {
   if (!user_readable(buf, len)) { return -(int64_t)EFAULT; }
-  return cell_fd_write((int)fd, buf, len);
+  return cell_fd_write((int)fd, buf, len, frame);
 }
 
 static int64_t sys_read(struct trap_frame *frame, uint64_t fd, uint64_t buf, uint64_t len) {
@@ -711,7 +722,7 @@ static int64_t sys_read(struct trap_frame *frame, uint64_t fd, uint64_t buf, uin
   return cell_fd_read((int)fd, buf, len, frame);
 }
 
-static int64_t sys_writev(uint64_t fd, uint64_t iov, uint64_t iovcnt) {
+static int64_t sys_writev(struct trap_frame *frame, uint64_t fd, uint64_t iov, uint64_t iovcnt) {
   if (iovcnt > MAX_IOVCNT) { return -(int64_t)EINVAL; }
   uint64_t iov_bytes;
   if (!checked_add(0, iovcnt * sizeof(struct iovec64), &iov_bytes) ||
@@ -723,14 +734,15 @@ static int64_t sys_writev(uint64_t fd, uint64_t iov, uint64_t iovcnt) {
   for (uint64_t i = 0; i < iovcnt; ++i) {
     struct iovec64 v;
     if (!vmm_copy_from_user(active_as(), &v, iov + i * sizeof(v), sizeof(v))) { return -(int64_t)EFAULT; }
-    int64_t wrote = sys_write(fd, v.base, v.len);
+    int64_t wrote = sys_write(frame, fd, v.base, v.len);
+    if (wrote == CELL_SWITCHED) { return wrote; }
     if (wrote < 0) { return wrote; }
     total += wrote;
   }
   return total;
 }
 
-static int64_t sys_readv(uint64_t fd, uint64_t iov, uint64_t iovcnt) {
+static int64_t sys_readv(struct trap_frame *frame, uint64_t fd, uint64_t iov, uint64_t iovcnt) {
   if (iovcnt > MAX_IOVCNT) { return -(int64_t)EINVAL; }
   uint64_t iov_bytes = iovcnt * sizeof(struct iovec64);
   if ((iovcnt != 0 && iov_bytes / sizeof(struct iovec64) != iovcnt) || !user_readable(iov, iov_bytes)) {
@@ -740,7 +752,8 @@ static int64_t sys_readv(uint64_t fd, uint64_t iov, uint64_t iovcnt) {
   for (uint64_t i = 0; i < iovcnt; ++i) {
     struct iovec64 v;
     if (!vmm_copy_from_user(active_as(), &v, iov + i * sizeof(v), sizeof(v))) { return -(int64_t)EFAULT; }
-    int64_t got = sys_read(NULL, fd, v.base, v.len);
+    int64_t got = sys_read(frame, fd, v.base, v.len);
+    if (got == CELL_SWITCHED) { return got; }
     if (got < 0) { return total == 0 ? got : total; }
     total += got;
     if ((uint64_t)got != v.len) { break; }
@@ -1371,7 +1384,7 @@ static int64_t sys_getdents64(uint64_t fd, uint64_t buf, uint64_t len) {
       .d_ino = ent.ino,
       .d_off = (int64_t)cell_fd_dir_offset((int)fd),
       .d_reclen = reclen,
-      .d_type = ent.is_dir ? DT_DIR : (ent.is_device ? DT_CHR : DT_REG),
+      .d_type = ent.type != 0 ? ent.type : (ent.is_dir ? DT_DIR : (ent.is_device ? DT_CHR : DT_REG)),
     };
     if (!vmm_copy_to_user(active_as(), buf + written, &hdr, sizeof(hdr)) ||
         !vmm_copy_to_user(active_as(), buf + written + sizeof(hdr), ent.name, name_len + 1)) {
@@ -1422,6 +1435,17 @@ static int64_t sys_mkdirat(uint64_t dirfd, uint64_t path_addr) {
   }
   if (!vfs_mkdir(path)) { return -(int64_t)EINVAL; }
   (void)vfs_chown(path, cell_current_euid(), cell_current_egid());
+  return 0;
+}
+
+static int64_t sys_mknodat(uint64_t dirfd, uint64_t path_addr, uint64_t mode) {
+  char path[128];
+  int64_t path_rc = copy_resolved_path_at(dirfd, path_addr, path, sizeof(path));
+  if (path_rc != 0) { return path_rc; }
+  if ((mode & S_IFMT) != S_IFIFO) { return -(int64_t)EINVAL; }
+  struct vfs_node node;
+  if (!vfs_mkfifo(path, (uint32_t)mode, &node)) { return -(int64_t)EEXIST; }
+  (void)vfs_chown_node(&node, cell_current_euid(), cell_current_egid());
   return 0;
 }
 
@@ -1543,7 +1567,24 @@ static bool copy_sockaddr_in(uint64_t addr, uint64_t len, struct sockaddr_in64 *
   return vmm_copy_from_user(active_as(), out, addr, sizeof(*out)) && out->sin_family == AF_INET;
 }
 
+static bool copy_sockaddr_family(uint64_t addr, uint64_t len, uint16_t *family) {
+  if (addr == 0 || len < sizeof(uint16_t) || !user_readable(addr, sizeof(uint16_t))) { return false; }
+  return vmm_copy_from_user(active_as(), family, addr, sizeof(*family));
+}
+
+static bool copy_sockaddr_un(uint64_t addr, uint64_t len, struct sockaddr_un64 *out) {
+  if (addr == 0 || len < 3 || len > sizeof(*out) || !user_readable(addr, len)) { return false; }
+  kmemset(out, 0, sizeof(*out));
+  if (!vmm_copy_from_user(active_as(), out, addr, (size_t)len) || out->sun_family != AF_UNIX) { return false; }
+  out->sun_path[sizeof(out->sun_path) - 1] = '\0';
+  return out->sun_path[0] == '/';
+}
+
 static int64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol) {
+  if (domain == AF_UNIX) {
+    if ((type & 0xf) != SOCK_STREAM || protocol != 0) { return -(int64_t)EPROTONOSUPPORT; }
+    return cell_fd_socket_unix();
+  }
   if (domain != AF_INET) { return -(int64_t)EAFNOSUPPORT; }
   if ((type & 0xf) != SOCK_DGRAM) { return -(int64_t)EPROTONOSUPPORT; }
   if (protocol == 0) { protocol = IPPROTO_UDP; }
@@ -1552,29 +1593,62 @@ static int64_t sys_socket(uint64_t domain, uint64_t type, uint64_t protocol) {
 }
 
 static int64_t sys_bind(uint64_t fd, uint64_t addr, uint64_t len) {
+  uint16_t family = 0;
+  if (!copy_sockaddr_family(addr, len, &family)) { return -(int64_t)EINVAL; }
+  if (family == AF_UNIX) {
+    struct sockaddr_un64 sa_un;
+    if (!copy_sockaddr_un(addr, len, &sa_un)) { return -(int64_t)EINVAL; }
+    int rc = cell_fd_unix_bind((int)fd, sa_un.sun_path);
+    return rc < 0 ? (int64_t)rc : 0;
+  }
   struct sockaddr_in64 sa;
   if (!copy_sockaddr_in(addr, len, &sa)) { return -(int64_t)EINVAL; }
   return cell_fd_udp_bind((int)fd, bswap16(sa.sin_port)) ? 0 : -(int64_t)EBADF;
 }
 
 static int64_t sys_connect(uint64_t fd, uint64_t addr, uint64_t len) {
+  uint16_t family = 0;
+  if (!copy_sockaddr_family(addr, len, &family)) { return -(int64_t)EINVAL; }
+  if (family == AF_UNIX) {
+    struct sockaddr_un64 sa_un;
+    if (!copy_sockaddr_un(addr, len, &sa_un)) { return -(int64_t)EINVAL; }
+    int rc = cell_fd_unix_connect((int)fd, sa_un.sun_path);
+    return rc < 0 ? (int64_t)rc : 0;
+  }
   struct sockaddr_in64 sa;
   if (!copy_sockaddr_in(addr, len, &sa)) { return -(int64_t)EINVAL; }
   if (!cell_egress_allowed(IPPROTO_UDP, sa.sin_addr, bswap16(sa.sin_port))) { return -(int64_t)EPERM; }
   return cell_fd_udp_connect((int)fd, sa.sin_addr, bswap16(sa.sin_port)) ? 0 : -(int64_t)EBADF;
 }
 
-static int64_t sys_sendto(uint64_t fd, uint64_t buf, uint64_t len, uint64_t flags, uint64_t addr, uint64_t addrlen) {
+static int64_t sys_listen(uint64_t fd, uint64_t backlog) {
+  int rc = cell_fd_unix_listen((int)fd, (int)backlog);
+  return rc < 0 ? (int64_t)rc : 0;
+}
+
+static int64_t sys_accept(struct trap_frame *frame, uint64_t fd, uint64_t addr, uint64_t addrlen) {
+  (void)addr;
+  (void)addrlen;
+  int rc = cell_fd_unix_accept((int)fd, frame);
+  return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : (int64_t)rc;
+}
+
+static int64_t sys_sendto(struct trap_frame *frame, uint64_t fd, uint64_t buf, uint64_t len, uint64_t flags,
+                          uint64_t addr, uint64_t addrlen) {
   (void)flags;
   if (!user_readable(buf, len)) { return -(int64_t)EFAULT; }
+  if (addr == 0) {
+    int64_t udp = cell_fd_udp_send((int)fd, 0, 0, buf, len);
+    if (udp != -EBADF) { return udp; }
+    int64_t rc = cell_fd_write((int)fd, buf, len, frame);
+    return rc == CELL_SWITCHED ? SYSCALL_SWITCHED : rc;
+  }
   uint32_t ip = 0;
   uint16_t port = 0;
-  if (addr != 0) {
-    struct sockaddr_in64 sa;
-    if (!copy_sockaddr_in(addr, addrlen, &sa)) { return -(int64_t)EINVAL; }
-    ip = sa.sin_addr;
-    port = bswap16(sa.sin_port);
-  }
+  struct sockaddr_in64 sa;
+  if (!copy_sockaddr_in(addr, addrlen, &sa)) { return -(int64_t)EINVAL; }
+  ip = sa.sin_addr;
+  port = bswap16(sa.sin_port);
   return cell_fd_udp_send((int)fd, ip, port, buf, len);
 }
 
@@ -1712,6 +1786,7 @@ static int64_t dispatch(struct trap_frame *f) {
     [SYS_FCHOWN] = &&l_fchown,
     [SYS_OPENAT] = &&l_openat,
     [SYS_CLOSE] = &&l_close,
+    [SYS_MKNODAT] = &&l_mknodat,
     [SYS_PIPE2] = &&l_pipe2,
     [SYS_GETDENTS64] = &&l_getdents64,
     [SYS_LSEEK] = &&l_lseek,
@@ -1757,8 +1832,8 @@ static int64_t dispatch(struct trap_frame *f) {
     [SYS_SYSINFO] = &&l_sysinfo,
     [SYS_SOCKET] = &&l_socket,
     [SYS_BIND] = &&l_bind,
-    [SYS_LISTEN] = &&l_enosys,
-    [SYS_ACCEPT] = &&l_enosys,
+    [SYS_LISTEN] = &&l_listen,
+    [SYS_ACCEPT] = &&l_accept,
     [SYS_CONNECT] = &&l_connect,
     [SYS_GETSOCKNAME] = &&l_getsockname,
     [SYS_SENDTO] = &&l_sendto,
@@ -1822,11 +1897,11 @@ l_sched_yield:
 l_read:
   return sys_read(f, a0, a1, a2);
 l_write:
-  return sys_write(a0, a1, a2);
+  return sys_write(f, a0, a1, a2);
 l_readv:
-  return sys_readv(a0, a1, a2);
+  return sys_readv(f, a0, a1, a2);
 l_writev:
-  return sys_writev(a0, a1, a2);
+  return sys_writev(f, a0, a1, a2);
 l_pselect6:
   return sys_pselect6(f, a0, a1, a2, a3, a4);
 l_ppoll:
@@ -1980,10 +2055,14 @@ l_socket:
   return sys_socket(a0, a1, a2);
 l_bind:
   return sys_bind(a0, a1, a2);
+l_listen:
+  return sys_listen(a0, a1);
+l_accept:
+  return sys_accept(f, a0, a1, a2);
 l_connect:
   return sys_connect(a0, a1, a2);
 l_sendto:
-  return sys_sendto(a0, a1, a2, a3, a4, a5);
+  return sys_sendto(f, a0, a1, a2, a3, a4, a5);
 l_recvfrom:
   return sys_recvfrom(f, a0, a1, a2, a3, a4, a5);
 l_getsockname:
@@ -2011,7 +2090,7 @@ l_readlinkat:
 l_dup:
   return cell_fd_dup((int)a0, 0);
 l_dup3:
-  return cell_fd_dup((int)a0, (int)a1);
+  return cell_fd_dup3((int)a0, (int)a1, (int)a2);
 l_fcntl:
   if (a1 == F_DUPFD) { return cell_fd_dup((int)a0, (int)a2); }
   if (a1 == F_GETFD || a1 == F_SETFD || a1 == F_GETFL || a1 == F_SETFL) { return 0; }
@@ -2036,6 +2115,8 @@ l_set_tid_address:
   return cell_set_tid_address_current(a0);
 l_ioctl:
   return sys_ioctl(a0, a1, a2);
+l_mknodat:
+  return sys_mknodat(a0, a1, a2);
 l_mkdirat:
   return sys_mkdirat(a0, a1);
 l_linkat:

@@ -98,3 +98,10 @@ test_futex_model = executable('test_futex_model',
   native: true)
 
 test('futex-model', test_futex_model)
+
+test_ipc_model = executable('test_ipc_model',
+  files('test_ipc_model.c'),
+  include_directories: test_include,
+  native: true)
+
+test('ipc-model', test_ipc_model)

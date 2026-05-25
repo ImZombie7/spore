@@ -24,6 +24,7 @@ enum {
   VFS_DEV_PROC = 0x0006,
   VFS_DEV_RAM0 = 0x0010,
   VFS_DEV_TMPFS = 0x0011,
+  VFS_DEV_RUNFS = 0x0012,
 };
 
 struct exec_cache_entry {
@@ -51,13 +52,15 @@ static bool path_is_mount(const char *path, const char *mount) {
 }
 
 static bool ramfs_route(const char *path) {
-  return path_is_mount(path, "/dev") || path_is_mount(path, "/proc") || path_is_mount(path, "/tmp");
+  return path_is_mount(path, "/dev") || path_is_mount(path, "/proc") || path_is_mount(path, "/tmp") ||
+         path_is_mount(path, "/run");
 }
 
 static bool same_ramfs_route(const char *a, const char *b) {
   return (path_is_mount(a, "/dev") && path_is_mount(b, "/dev")) ||
          (path_is_mount(a, "/proc") && path_is_mount(b, "/proc")) ||
-         (path_is_mount(a, "/tmp") && path_is_mount(b, "/tmp"));
+         (path_is_mount(a, "/tmp") && path_is_mount(b, "/tmp")) ||
+         (path_is_mount(a, "/run") && path_is_mount(b, "/run"));
 }
 
 static bool ramfs_device_is_block(enum ramfs_device device) {
@@ -76,6 +79,8 @@ static uint64_t ramfs_mount_dev_id(enum ramfs_mount mount) {
     return VFS_DEV_PROC;
   case RAMFS_MOUNT_TMP:
     return VFS_DEV_TMPFS;
+  case RAMFS_MOUNT_RUN:
+    return VFS_DEV_RUNFS;
   case RAMFS_MOUNT_RAM0:
     return VFS_DEV_RAM0;
   }
@@ -109,7 +114,9 @@ static uint64_t ramfs_device_rdev(enum ramfs_device device) {
 
 static void from_ramfs(const struct ramfs_node *node, struct vfs_node *out) {
   uint16_t perms = node->mode == 0 ? (node->is_dir ? 0777u : 0666u) : (uint16_t)(node->mode & 07777u);
-  uint16_t mode = node->is_dir ? (uint16_t)(0040000u | perms) : (uint16_t)(0100000u | perms);
+  uint16_t type = (uint16_t)(node->mode & 0170000u);
+  uint16_t mode =
+    type != 0 ? (uint16_t)(type | perms) : (node->is_dir ? (uint16_t)(0040000u | perms) : (uint16_t)(0100000u | perms));
   if (node->device != RAMFS_DEV_NONE) {
     if (ramfs_device_is_block(node->device)) {
       mode = (uint16_t)(0060000u | perms);
@@ -476,6 +483,24 @@ bool vfs_create(const char *path, struct vfs_node *out) {
   return true;
 }
 
+bool vfs_mkfifo(const char *path, uint32_t mode, struct vfs_node *out) {
+  struct ramfs_node node;
+  if (root_ramfs == NULL || !ramfs_route(path) || !ramfs_mkfifo(root_ramfs, path, (uint16_t)mode, &node)) {
+    return false;
+  }
+  from_ramfs(&node, out);
+  return true;
+}
+
+bool vfs_mksock(const char *path, uint32_t mode, struct vfs_node *out) {
+  struct ramfs_node node;
+  if (root_ramfs == NULL || !ramfs_route(path) || !ramfs_mksock(root_ramfs, path, (uint16_t)mode, &node)) {
+    return false;
+  }
+  from_ramfs(&node, out);
+  return true;
+}
+
 bool vfs_truncate(const struct vfs_node *node, uint64_t size) {
   if (node->backend == VFS_EXT2) {
     struct ext2_node ext = node->ext2;
@@ -617,7 +642,7 @@ bool vfs_dirent(const struct vfs_node *dir, size_t index, struct vfs_dirent *out
   if (dir->backend == VFS_RAMFS) {
     struct ramfs_dirent ent;
     if (ramfs_dirent(dir->ramfs.fs, dir->ramfs.index, index, &ent)) {
-      *out = (struct vfs_dirent){.ino = ent.ino, .is_dir = ent.is_dir, .is_device = ent.is_device};
+      *out = (struct vfs_dirent){.ino = ent.ino, .is_dir = ent.is_dir, .is_device = ent.is_device, .type = ent.type};
       kmemcpy(out->name, ent.name, kstrlen(ent.name) + 1);
       return true;
     }
@@ -706,7 +731,7 @@ static void set_mount_info(struct vfs_mount_info *out, const char *source, const
 }
 
 size_t vfs_mount_info(struct vfs_mount_info *out, size_t cap) {
-  enum { MOUNT_COUNT = 6 };
+  enum { MOUNT_COUNT = 7 };
   if (out == NULL || cap == 0) { return MOUNT_COUNT; }
 
   size_t n = 0;
@@ -719,6 +744,10 @@ size_t vfs_mount_info(struct vfs_mount_info *out, size_t cap) {
   uint64_t tmp_used = ramfs_backing_used_pages();
   if (n < cap) {
     set_mount_info(&out[n++], "tmpfs", "/tmp", "tmpfs", RAMFS_PAGE_SIZE, tmp_blocks,
+                   tmp_used < tmp_blocks ? tmp_blocks - tmp_used : 0);
+  }
+  if (n < cap) {
+    set_mount_info(&out[n++], "runfs", "/run", "tmpfs", RAMFS_PAGE_SIZE, tmp_blocks,
                    tmp_used < tmp_blocks ? tmp_blocks - tmp_used : 0);
   }
   if (n < cap) {

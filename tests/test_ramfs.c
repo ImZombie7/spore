@@ -51,6 +51,8 @@ int main(void) {
   assert(ramfs_root_dirent(5, &ent));
   assert(strcmp(ent.name, "tmp") == 0 && ent.is_dir);
   assert(ramfs_root_dirent(6, &ent));
+  assert(strcmp(ent.name, "run") == 0 && ent.is_dir);
+  assert(ramfs_root_dirent(7, &ent));
   assert(strcmp(ent.name, "init") == 0 && !ent.is_dir);
   assert(ramfs_lookup_node(&fs, "/dev/null", &node));
   assert(!node.is_dir && node.device == RAMFS_DEV_NULL);
@@ -74,6 +76,10 @@ int main(void) {
   assert(!node.is_dir && node.device == RAMFS_DEV_PROCINFO);
 
   assert(ramfs_mkdir(&fs, "/tmp/d"));
+  assert(ramfs_mkfifo(&fs, "/run/f", 0666, &node));
+  assert((node.mode & 0170000u) == 0010000u);
+  assert(ramfs_mksock(&fs, "/run/s", 0666, &node));
+  assert((node.mode & 0170000u) == 0140000u);
   assert(ramfs_create(&fs, "/tmp/d/a", &node));
   assert(ramfs_write(&fs, node.index, 0, "hello", 5) == 5);
   assert(ramfs_chmod_node(&fs, node.index, 0600));

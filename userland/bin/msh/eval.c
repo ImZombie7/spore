@@ -24,6 +24,8 @@ struct job {
 
 static struct job jobs[JOB_CAP];
 
+static int run_builtin(struct command *cmd, int last_status, bool *handled);
+
 static const char *command_name(char **argv) {
   return argv != NULL && argv[0] != NULL ? argv[0] : "?";
 }
@@ -220,6 +222,93 @@ static int run_external(struct command *cmd) {
     return 0;
   }
   return wait_status(pid);
+}
+
+static int run_pipeline(struct command *stages, size_t count, bool background, int last_status) {
+  enum { PIPELINE_CAP = 8 };
+  int pipes[PIPELINE_CAP - 1][2];
+  pid_t pids[PIPELINE_CAP];
+  int created = 0;
+
+  if (count == 0 || count > PIPELINE_CAP) {
+    fprintf(stderr, "sh: pipeline too long\n");
+    return 2;
+  }
+
+  for (size_t i = 0; i + 1 < count; ++i) {
+    if (pipe(pipes[i]) != 0) {
+      perror("pipe");
+      while (created > 0) {
+        --created;
+        close(pipes[created][0]);
+        close(pipes[created][1]);
+      }
+      return 1;
+    }
+    ++created;
+  }
+
+  for (size_t i = 0; i < count; ++i) {
+    pid_t pid = fork();
+    if (pid < 0) {
+      perror("fork");
+      for (int j = 0; j < created; ++j) {
+        close(pipes[j][0]);
+        close(pipes[j][1]);
+      }
+      return 1;
+    }
+    if (pid == 0) {
+      if (i > 0 && dup2(pipes[i - 1][0], STDIN_FILENO) < 0) {
+        perror("dup2");
+        _exit(126);
+      }
+      if (i + 1 < count && dup2(pipes[i][1], STDOUT_FILENO) < 0) {
+        perror("dup2");
+        _exit(126);
+      }
+      for (int j = 0; j < created; ++j) {
+        close(pipes[j][0]);
+        close(pipes[j][1]);
+      }
+      if (apply_redirs(&stages[i].redir) != 0) {
+        perror("redir");
+        _exit(126);
+      }
+      bool handled = false;
+      int builtin_status = run_builtin(&stages[i], last_status, &handled);
+      if (handled) { _exit(builtin_status); }
+      exec_search(stages[i].argv);
+      fprintf(stderr, "%s: not found\n", stages[i].argv[0]);
+      _exit(127);
+    }
+    pids[i] = pid;
+  }
+
+  for (int j = 0; j < created; ++j) {
+    close(pipes[j][0]);
+    close(pipes[j][1]);
+  }
+
+  if (background) {
+    remember_job(pids[count - 1], stages[0].argv);
+    return 0;
+  }
+
+  int result = 0;
+  for (size_t i = 0; i < count; ++i) {
+    int status = 0;
+    if (waitpid(pids[i], &status, 0) < 0) {
+      perror("waitpid");
+      result = 1;
+      continue;
+    }
+    if (i + 1 == count) {
+      if (WIFSIGNALED(status)) { puts(signal_message(WTERMSIG(status))); }
+      result = status_code(status);
+    }
+  }
+  return result;
 }
 
 static int run_confined(const char *manifest, char **argv, const struct redirs *redir) {
@@ -816,17 +905,41 @@ int sh_execute_line(char *line, int last_status) {
   enum token_type previous = TOK_SEMI;
   int status = last_status;
   while (sh_parser_peek(&parser) != TOK_END) {
-    struct command cmd;
-    if (sh_parse_command(&parser, &cmd) != 0) { return 2; }
-    if (sh_parser_peek(&parser) == TOK_BG) { cmd.background = true; }
+    struct command stages[8];
+    size_t stage_count = 0;
+    if (sh_parse_command(&parser, &stages[stage_count]) != 0) { return 2; }
+    ++stage_count;
+    while (sh_parser_peek(&parser) == TOK_PIPE) {
+      (void)sh_parser_take(&parser);
+      if (stage_count >= sizeof(stages) / sizeof(stages[0])) {
+        eprintf("sh: pipeline too long\n");
+        return 2;
+      }
+      if (sh_parse_command(&parser, &stages[stage_count]) != 0) { return 2; }
+      if (stages[stage_count].argc == 0) {
+        eprintf("sh: syntax error near '|'\n");
+        return 2;
+      }
+      ++stage_count;
+    }
+    bool background = sh_parser_peek(&parser) == TOK_BG;
+    if (background) {
+      for (size_t i = 0; i < stage_count; ++i) {
+        stages[i].background = true;
+      }
+    }
 
     bool should_run =
       previous == TOK_SEMI || (previous == TOK_AND && status == 0) || (previous == TOK_OR && status != 0);
-    if (cmd.argc > 0 && should_run) {
-      trace_command(&cmd);
-      bool handled = false;
-      int builtin_status = run_builtin(&cmd, status, &handled);
-      status = handled ? builtin_status : run_external(&cmd);
+    if (stages[0].argc > 0 && should_run) {
+      trace_command(&stages[0]);
+      if (stage_count > 1) {
+        status = run_pipeline(stages, stage_count, background, status);
+      } else {
+        bool handled = false;
+        int builtin_status = run_builtin(&stages[0], status, &handled);
+        status = handled ? builtin_status : run_external(&stages[0]);
+      }
     }
 
     enum token_type next = sh_parser_peek(&parser);
