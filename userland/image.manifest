@@ -84,14 +84,15 @@ userland/bin/ping /bin/ping
 userland/bin/udp-echo /bin/udp-echo
 userland/bin/udp-send /bin/udp-send
 userland/bin/udp-recv /bin/udp-recv
-userland/demos/spinner /demos/spinner
-userland/demos/peeker /demos/peeker
-userland/demos/writer /demos/writer
-userland/demos/memhog /demos/memhog
-userland/demos/escalate /demos/escalate
-userland/demos/signal-crash /demos/signal-crash
-userland/demos/something /demos/something
-userland/demos/something-else.msh /demos/something-else.msh
+
+userland/demos/spinner /home/spore/demos/spinner
+userland/demos/peeker /home/spore/demos/peeker
+userland/demos/writer /home/spore/demos/writer
+userland/demos/memhog /home/spore/demos/memhog
+userland/demos/escalate /home/spore/demos/escalate
+userland/demos/signal-crash /home/spore/demos/signal-crash
+userland/demos/something /home/spore/demos/something
+userland/demos/something-else.msh /home/spore/demos/something-else.msh
 
 userland/usr/local/bin/fastfetch /usr/local/bin/fastfetch
 userland/usr/local/bin/htop /usr/local/bin/htop

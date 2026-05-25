@@ -285,7 +285,7 @@ static void copy_into_rootfs(const char *src, const char *rootfs, const char *ds
   }
   copy_file(src, out);
   bool executable = strcmp(dst, "/init") == 0 || strncmp(dst, "/bin/", 5) == 0 || strncmp(dst, "/usr/bin/", 9) == 0 ||
-                    strncmp(dst, "/usr/local/bin/", 15) == 0 || strncmp(dst, "/demos/", 7) == 0;
+                    strncmp(dst, "/usr/local/bin/", 15) == 0 || strncmp(dst, "/home/spore/demos/", 18) == 0;
   chmod(out, executable ? 0755 : 0644);
 }
 
@@ -407,6 +407,28 @@ static void build_root_ext2(const char *rootfs_dir, const char *output_root, con
                                   "set_inode_field /home/spore/.profile gid 1000\n"
                                   "set_inode_field /home/spore/.mshrc uid 1000\n"
                                   "set_inode_field /home/spore/.mshrc gid 1000\n");
+  char demos_path[MAX_PATH];
+  path_join(demos_path, sizeof(demos_path), rootfs_dir, "home/spore/demos");
+  if (exists(demos_path)) {
+    run_debugfs_script(output_root, "set_inode_field /home/spore/demos uid 1000\n"
+                                    "set_inode_field /home/spore/demos gid 1000\n"
+                                    "set_inode_field /home/spore/demos/escalate uid 1000\n"
+                                    "set_inode_field /home/spore/demos/escalate gid 1000\n"
+                                    "set_inode_field /home/spore/demos/memhog uid 1000\n"
+                                    "set_inode_field /home/spore/demos/memhog gid 1000\n"
+                                    "set_inode_field /home/spore/demos/peeker uid 1000\n"
+                                    "set_inode_field /home/spore/demos/peeker gid 1000\n"
+                                    "set_inode_field /home/spore/demos/signal-crash uid 1000\n"
+                                    "set_inode_field /home/spore/demos/signal-crash gid 1000\n"
+                                    "set_inode_field /home/spore/demos/something uid 1000\n"
+                                    "set_inode_field /home/spore/demos/something gid 1000\n"
+                                    "set_inode_field /home/spore/demos/something-else.msh uid 1000\n"
+                                    "set_inode_field /home/spore/demos/something-else.msh gid 1000\n"
+                                    "set_inode_field /home/spore/demos/spinner uid 1000\n"
+                                    "set_inode_field /home/spore/demos/spinner gid 1000\n"
+                                    "set_inode_field /home/spore/demos/writer uid 1000\n"
+                                    "set_inode_field /home/spore/demos/writer gid 1000\n");
+  }
   char sudo_path[MAX_PATH];
   path_join(sudo_path, sizeof(sudo_path), rootfs_dir, "bin/sudo");
   if (exists(sudo_path)) {

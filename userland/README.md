@@ -8,7 +8,7 @@ each tool independently confineable by the policy layer.
 - `lib/spore/`: tiny shared helper runtime used by tools.
 - `bin/<tool>/main.c`: real commands baked into `/bin`; `bin/sh` is also
   baked as `/init`.
-- `demos/<name>/main.c`: confinement fixtures baked into `/demos`.
+- `demos/<name>/main.c`: confinement fixtures baked into `/home/spore/demos`.
 - `tests/integration/`: regression binaries used only by `run-tests`.
 - `image.manifest`: declarative list of sources and baked paths for the
   interactive image.
@@ -40,7 +40,7 @@ contract is to print a result.
 
 1. Create `userland/demos/<name>/main.c`.
 2. Add a `manifest` file describing the policy fixture.
-3. Add `userland/demos/<name> /demos/<name>` to `userland/image.manifest`.
+3. Add `userland/demos/<name> /home/spore/demos/<name>` to `userland/image.manifest`.
 4. Update `tools/src/spore_run.c`'s shell mode if the demo is part of the policy gate.
 
 ## Regression Image
