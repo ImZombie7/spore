@@ -20,10 +20,21 @@ wrap_dir="$build/aclocal-wrap"
 aclocal_extra="$build/aclocal-extra"
 gnulib_hash="b75134c814c38876f04029ffc3fae4e90035dc34"
 gnulib_cache="$build/gnulib-cache"
+stamp="$build/.nano.stamp"
+stamp_new="$build/.nano.stamp.new"
 
 mkdir -p "$build"
 test -f "$nc_inst/lib/libncurses.so.6.4"
 cc "$root/tools/src/elf_clean_runpath.c" -o "$cleaner"
+{
+  git -C "$nano_src" rev-parse HEAD
+  printf '%s\n' "$gnulib_hash"
+  cksum "$0" "$nc_inst/lib/libncurses.so.6.4" "$root/tools/src/elf_clean_runpath.c"
+} >"$stamp_new"
+if [ -f "$out" ] && [ -f "$stamp" ] && cmp -s "$stamp_new" "$stamp"; then
+  rm -f "$stamp_new"
+  exit 0
+fi
 
 rm -rf "$nano_work" "$nano_build" "$wrap_dir" "$aclocal_extra"
 mkdir -p "$nano_work" "$nano_build" "$wrap_dir" "$aclocal_extra"
@@ -35,7 +46,8 @@ if [ ! -d "$gnulib_cache/.git" ]; then
 fi
 git -C "$gnulib_cache" fetch --depth=2222 origin "$gnulib_hash" >/dev/null 2>&1 || true
 git -C "$gnulib_cache" checkout --force "$gnulib_hash" >/dev/null
-cp -R "$gnulib_cache" "$nano_work/gnulib"
+mkdir -p "$nano_work/gnulib"
+tar -C "$gnulib_cache" -cf - . | tar -C "$nano_work/gnulib" -xf -
 
 pkg_m4=$(find /nix/store /opt/homebrew /usr/local /run/current-system/sw -path '*/pkg.m4' -print 2>/dev/null | head -1 || true)
 if [ -z "$pkg_m4" ]; then
@@ -78,3 +90,4 @@ chmod +x "$wrap_dir/aclocal"
 make -C "$nano_build" -j"$jobs" >/dev/null
 aarch64-unknown-linux-musl-strip -o "$out" "$nano_build/src/nano"
 "$cleaner" "$out"
+mv "$stamp_new" "$stamp"

@@ -15,10 +15,20 @@ cleaner="$build/elf-clean-runpath"
 nc_inst="$build/../../../../lib/ncurses/ncurses-install"
 vim_src="$root/userland/third_party/vim"
 vim_work="$build/vim-src"
+stamp="$build/.vim.stamp"
+stamp_new="$build/.vim.stamp.new"
 
 mkdir -p "$build"
 test -f "$nc_inst/lib/libncurses.so.6.4"
 cc "$root/tools/src/elf_clean_runpath.c" -o "$cleaner"
+{
+  git -C "$vim_src" rev-parse HEAD
+  cksum "$0" "$nc_inst/lib/libncurses.so.6.4" "$root/tools/src/elf_clean_runpath.c"
+} >"$stamp_new"
+if [ -f "$out" ] && [ -f "$stamp" ] && cmp -s "$stamp_new" "$stamp"; then
+  rm -f "$stamp_new"
+  exit 0
+fi
 
 rm -rf "$vim_work"
 mkdir -p "$vim_work"
@@ -57,3 +67,4 @@ git -C "$vim_src" archive --format=tar HEAD | tar -x -C "$vim_work"
 make -C "$vim_work/src" -j"$jobs" vim >/dev/null
 aarch64-unknown-linux-musl-strip -o "$out" "$vim_work/src/vim"
 "$cleaner" "$out"
+mv "$stamp_new" "$stamp"

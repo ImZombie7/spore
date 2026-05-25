@@ -16,7 +16,9 @@ enum {
   DT_RUNPATH = 29,
 };
 
-#define ELFMAG "\177" "ELF"
+#define ELFMAG                                                                                                         \
+  "\177"                                                                                                               \
+  "ELF"
 #define SELFMAG 4
 
 typedef struct {

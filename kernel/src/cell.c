@@ -20,6 +20,7 @@ static int next_thread_id = 1;
 static int next_snapshot_id;
 static uint64_t device_rng_state = 0x9e3779b97f4a7c15ull;
 static uint64_t scheduler_ticks;
+static uint64_t scheduler_idle_ticks;
 static uint64_t boot_epoch_sec;
 static uint64_t proc_cache_tick = UINT64_MAX;
 static size_t proc_cache_rss[MAX_DOMAINS];
@@ -35,6 +36,7 @@ static size_t tty_output_line_len;
 static char tty_prompt[256];
 static size_t tty_prompt_len;
 static bool tty_prompt_active;
+static bool scheduler_waiting_for_interrupt;
 
 static size_t domain_resident_pages(const struct domain *domain);
 static void wake_poll_waiters(void);
@@ -475,6 +477,8 @@ void cell_system_init(uint64_t hhdm_offset) {
   next_thread_id = 1;
   next_snapshot_id = 0;
   scheduler_ticks = 0;
+  scheduler_idle_ticks = 0;
+  scheduler_waiting_for_interrupt = false;
   // v2 Phase A object model: domains own isolation/policy state, threads own
   // EL0 execution state. The kernel remains run-to-completion on one core, so
   // these tables intentionally have no locks until a later SMP/preemptive goal.
@@ -752,12 +756,14 @@ void cell_schedule(struct trap_frame *frame) {
       }
     }
     if (!has_blocked) { break; }
+    scheduler_waiting_for_interrupt = true;
     __asm__ volatile("msr daifclr, #2\n"
                      "wfi\n"
                      "msr daifset, #2\n"
                      :
                      :
                      : "memory");
+    scheduler_waiting_for_interrupt = false;
   }
   kprintf("[kernel] no runnable threads\n");
   poweroff();
@@ -1019,6 +1025,7 @@ void cell_set_boot_epoch(uint64_t epoch_sec) {
 
 void cell_timer_tick(struct trap_frame *frame, bool from_lower_el) {
   ++scheduler_ticks;
+  if (scheduler_waiting_for_interrupt) { ++scheduler_idle_ticks; }
   net_poll();
   wake_poll_waiters();
   struct domain *domain = current_domain();
@@ -1559,8 +1566,8 @@ static uint64_t total_domain_cpu_ticks(void) {
 
 static size_t stat_text(char *dst, size_t cap) {
   size_t len = 0;
-  uint64_t busy_ticks = total_domain_cpu_ticks();
-  uint64_t idle_ticks = scheduler_ticks > busy_ticks ? scheduler_ticks - busy_ticks : 0;
+  uint64_t idle_ticks = scheduler_idle_ticks > scheduler_ticks ? scheduler_ticks : scheduler_idle_ticks;
+  uint64_t busy_ticks = scheduler_ticks - idle_ticks;
   uint64_t running = 0;
   uint64_t blocked = 0;
   for (size_t i = 0; i < MAX_THREADS; ++i) {

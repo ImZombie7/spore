@@ -15,10 +15,20 @@ cleaner="$build/elf-clean-runpath"
 nc_inst="$build/../../../../lib/ncurses/ncurses-install"
 ht_src="$root/userland/third_party/htop"
 ht_build="$build/htop-build"
+stamp="$build/.htop.stamp"
+stamp_new="$build/.htop.stamp.new"
 
 mkdir -p "$build"
 test -f "$nc_inst/lib/libncurses.so.6.4"
 cc "$root/tools/src/elf_clean_runpath.c" -o "$cleaner"
+{
+  git -C "$ht_src" rev-parse HEAD
+  cksum "$0" "$nc_inst/lib/libncurses.so.6.4" "$root/tools/src/elf_clean_runpath.c"
+} >"$stamp_new"
+if [ -f "$out" ] && [ -f "$stamp" ] && cmp -s "$stamp_new" "$stamp"; then
+  rm -f "$stamp_new"
+  exit 0
+fi
 
 if [ ! -f "$ht_src/configure" ]; then
   (cd "$ht_src" && ./autogen.sh >/dev/null)
@@ -46,3 +56,4 @@ mkdir -p "$ht_build"
 make -C "$ht_build" -j"$jobs" htop >/dev/null
 aarch64-unknown-linux-musl-strip -o "$out" "$ht_build/htop"
 "$cleaner" "$out"
+mv "$stamp_new" "$stamp"
