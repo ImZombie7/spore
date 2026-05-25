@@ -34,6 +34,7 @@ static uint64_t boot_epoch_sec;
 static uint64_t proc_cache_tick = UINT64_MAX;
 static size_t proc_cache_rss[MAX_DOMAINS];
 static uint32_t tty_lflag = 0000002 | 0000010;
+static uint8_t tty_erase = 0x7f;
 static char tty_line[256];
 static size_t tty_line_len;
 static size_t tty_line_cursor;
@@ -2147,6 +2148,14 @@ void cell_tty_set_lflag(uint32_t lflag) {
   }
 }
 
+uint8_t cell_tty_erase_char(void) {
+  return tty_erase;
+}
+
+void cell_tty_set_erase_char(uint8_t ch) {
+  if (ch != 0) { tty_erase = ch; }
+}
+
 static void tty_begin_canonical_read(void) {
   if (tty_prompt_active) { return; }
   tty_prompt_len = tty_output_line_len;
@@ -2259,6 +2268,7 @@ static void tty_process_input(void) {
   char c;
   while (tty_ready_len == 0 && pl011_getc(&c)) {
     if (!tty_canonical()) {
+      if ((uint8_t)c == 0x08 || (uint8_t)c == 0x7f) { c = (char)tty_erase; }
       tty_ready_push(c);
       return;
     }
@@ -2284,7 +2294,7 @@ static void tty_process_input(void) {
       tty_ready_push('\n');
       return;
     }
-    if (c == '\b' || c == 0x7f) {
+    if ((uint8_t)c == 0x08 || (uint8_t)c == 0x7f || (uint8_t)c == tty_erase) {
       if (tty_line_cursor > 0) {
         for (size_t i = tty_line_cursor - 1; i + 1 < tty_line_len; ++i) {
           tty_line[i] = tty_line[i + 1];

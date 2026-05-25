@@ -1643,7 +1643,7 @@ static int64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg) {
       .c_ospeed = 38400,
     };
     tio.c_cc[0] = 3;
-    tio.c_cc[2] = 0x7f;
+    tio.c_cc[2] = cell_tty_erase_char();
     tio.c_cc[3] = 21;
     tio.c_cc[4] = 4;
     tio.c_cc[5] = 0;
@@ -1657,6 +1657,7 @@ static int64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg) {
       return -(int64_t)EFAULT;
     }
     cell_tty_set_lflag(tio.c_lflag);
+    cell_tty_set_erase_char(tio.c_cc[2]);
     return 0;
   }
   return -(int64_t)EINVAL;

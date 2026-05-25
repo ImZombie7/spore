@@ -1,0 +1,3 @@
+spore|Spore serial terminal,
+	kbs=\177,
+	use=xterm-256color,

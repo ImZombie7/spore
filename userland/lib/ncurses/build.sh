@@ -53,6 +53,11 @@ if command -v infocmp >/dev/null 2>&1 && command -v tic >/dev/null 2>&1; then
     mkdir -p "$terminfo_dir/x"
     cp "$terminfo_dir/78/xterm-256color" "$terminfo_dir/x/xterm-256color"
   fi
+  tic -x -o "$terminfo_dir" "$root/userland/lib/ncurses/terminfo/spore.src"
+  if [ -f "$terminfo_dir/73/spore" ] && [ ! -f "$terminfo_dir/s/spore" ]; then
+    mkdir -p "$terminfo_dir/s"
+    cp "$terminfo_dir/73/spore" "$terminfo_dir/s/spore"
+  fi
 else
   echo "ncurses: host tic/infocmp are required to build terminfo" >&2
   exit 1

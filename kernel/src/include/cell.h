@@ -269,6 +269,8 @@ size_t cell_resident_pages(uint64_t start, uint64_t end);
 size_t cell_proc_info(struct proc_info *out, size_t max);
 uint32_t cell_tty_lflag(void);
 void cell_tty_set_lflag(uint32_t lflag);
+uint8_t cell_tty_erase_char(void);
+void cell_tty_set_erase_char(uint8_t ch);
 int cell_set_budget(int domain_id, uint64_t ticks);
 void cell_timer_tick(struct trap_frame *frame, bool from_lower_el);
 void cell_set_boot_epoch(uint64_t epoch_sec);
